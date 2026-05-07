@@ -337,23 +337,23 @@ function OrderForm({ form, setForm, signers, editingId, onSubmit, onCancel }) {
           <input value={form.itemName} onChange={(event) => update("itemName", event.target.value)} required />
         </label>
         <label>
-          Identificador
+          Modelo do Terminal
           <input value={form.itemIdentifier} onChange={(event) => update("itemIdentifier", event.target.value)} required />
         </label>
         <label>
-          Pessoa autorizada
+          Solicitante
           <input value={form.authorizedPersonName} onChange={(event) => update("authorizedPersonName", event.target.value)} required />
         </label>
         <label>
-          Documento
+          Nº OS
           <input value={form.authorizedPersonDocument} onChange={(event) => update("authorizedPersonDocument", event.target.value)} required />
         </label>
         <label>
-          Valida de
+          Data Solicitação
           <input type="date" value={form.validFrom} onChange={(event) => update("validFrom", event.target.value)} required />
         </label>
         <label>
-          Valida ate
+          Prazo Assinatura
           <input type="date" value={form.validUntil} onChange={(event) => update("validUntil", event.target.value)} required />
         </label>
       </div>
@@ -367,7 +367,7 @@ function OrderForm({ form, setForm, signers, editingId, onSubmit, onCancel }) {
         </select>
       </label>
       <label>
-        Justificativa de uso
+        Configuração
         <textarea value={form.usageReason} onChange={(event) => update("usageReason", event.target.value)} required />
       </label>
       <div className="actions">

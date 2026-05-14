@@ -26,6 +26,11 @@ button {
   cursor: pointer;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
 .login-page {
   min-height: 100vh;
   display: grid;
@@ -262,7 +267,8 @@ textarea {
 .muted,
 .timeline small,
 .user-list small,
-.signature-box small {
+.signature-box small,
+.signature-box span {
   color: #66746d;
 }
 
@@ -361,10 +367,50 @@ dd {
   padding: 14px;
 }
 
+.signature-list {
+  display: grid;
+  gap: 10px;
+}
+
+.signature-list h3 {
+  margin-bottom: 2px;
+}
+
+.signature-box span {
+  display: block;
+  font-size: 12px;
+  margin-top: 2px;
+}
+
 .signature-box small {
   display: block;
   word-break: break-all;
   margin-top: 4px;
+}
+
+.auto-field,
+.inline-note {
+  border: 1px solid #dfe5dd;
+  border-radius: 8px;
+  background: #f7faf7;
+  padding: 12px;
+}
+
+.auto-field {
+  display: grid;
+  gap: 3px;
+}
+
+.auto-field span {
+  color: #66746d;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.inline-note {
+  margin: 0;
+  color: #43524b;
+  font-weight: 700;
 }
 
 .timeline {
@@ -409,9 +455,17 @@ dd {
   gap: 10px;
 }
 
-.user-list div {
+.user-list article {
   border-top: 1px solid #e6ebe5;
   padding-top: 10px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 170px) 40px;
+  gap: 8px;
+  align-items: center;
+}
+
+.user-list article.inactive-user {
+  opacity: 0.62;
 }
 
 @media (max-width: 1180px) {

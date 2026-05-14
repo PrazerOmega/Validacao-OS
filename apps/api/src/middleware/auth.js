@@ -1,6 +1,7 @@
 import jwt from "jsonwebtoken";
+import { query } from "../db/pool.js";
 
-export function requireAuth(req, res, next) {
+export async function requireAuth(req, res, next) {
   const header = req.headers.authorization;
 
   if (!header?.startsWith("Bearer ")) {
@@ -9,7 +10,17 @@ export function requireAuth(req, res, next) {
 
   try {
     const token = header.slice("Bearer ".length);
-    req.user = jwt.verify(token, process.env.JWT_SECRET);
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    const { rows } = await query(
+      "SELECT id, name, email, role FROM users WHERE id = $1 AND active = TRUE",
+      [payload.id]
+    );
+
+    if (!rows[0]) {
+      return res.status(401).json({ message: "Usuario inativo ou inexistente." });
+    }
+
+    req.user = rows[0];
     return next();
   } catch {
     return res.status(401).json({ message: "Token invalido." });

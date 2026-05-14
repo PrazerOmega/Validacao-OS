@@ -1,10 +1,11 @@
 import crypto from "node:crypto";
 
-export function buildSignature({ order, signer, ipAddress, userAgent }) {
+export function buildSignature({ order, signer, signerName, ipAddress, userAgent }) {
   const signedAt = new Date().toISOString();
   const payload = {
     orderId: order.id,
     code: order.code,
+    orderType: order.order_type,
     itemName: order.item_name,
     itemIdentifier: order.item_identifier,
     authorizedPersonName: order.authorized_person_name,
@@ -12,8 +13,10 @@ export function buildSignature({ order, signer, ipAddress, userAgent }) {
     usageReason: order.usage_reason,
     validFrom: order.valid_from,
     validUntil: order.valid_until,
+    signatureDueAt: order.signature_due_at,
     signerId: signer.id,
     signerEmail: signer.email,
+    signerName,
     signedAt,
     ipAddress,
     userAgent

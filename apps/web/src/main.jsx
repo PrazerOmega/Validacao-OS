@@ -9,8 +9,10 @@ import {
   LogOut,
   Plus,
   RefreshCw,
+  Save,
   Send,
   ShieldCheck,
+  Trash2,
   UserPlus,
   XCircle
 } from "lucide-react";
@@ -20,9 +22,9 @@ const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3333";
 
 const statusLabels = {
   draft: "Rascunho",
-  pending_signature: "Aguardando assinatura",
+  pending_signature: "Aguardando assinaturas",
   correction_requested: "Correcao solicitada",
-  signed: "Assinada",
+  signed: "Aprovada",
   cancelled: "Cancelada"
 };
 
@@ -34,15 +36,35 @@ const statusIcons = {
   cancelled: XCircle
 };
 
+const orderTypeOptions = [
+  { value: "Reparo", label: "Reparo" },
+  { value: "Atualizacao", label: "Atualiza\u00e7\u00e3o" },
+  { value: "Teste", label: "Teste" }
+];
+
+const terminalModelOptions = ["D195", "S920", "Q92x", "A910", "P2"];
+
+const roleOptions = [
+  { value: "requester", label: "Solicitante" },
+  { value: "signer", label: "Assinador" },
+  { value: "admin", label: "Admin" }
+];
+
+const destinationOptions = [
+  { value: "signer", label: "Assinadores" }
+];
+
 const emptyOrder = {
+  orderType: "Reparo",
   itemName: "",
-  itemIdentifier: "",
+  itemIdentifier: "D195",
   authorizedPersonName: "",
   authorizedPersonDocument: "",
   usageReason: "",
   validFrom: "",
   validUntil: "",
-  signerId: ""
+  signatureDueAt: "",
+  destinationRole: "signer"
 };
 
 function useApi(session, onUnauthorized) {
@@ -136,11 +158,11 @@ function App() {
   });
   const [orders, setOrders] = useState([]);
   const [selected, setSelected] = useState(null);
-  const [signers, setSigners] = useState([]);
   const [users, setUsers] = useState([]);
   const [form, setForm] = useState(emptyOrder);
   const [editingId, setEditingId] = useState(null);
   const [feedback, setFeedback] = useState("");
+  const [signatureName, setSignatureName] = useState("");
   const [newUser, setNewUser] = useState({ name: "", email: "", password: "", role: "requester" });
   const [message, setMessage] = useState("");
 
@@ -154,17 +176,14 @@ function App() {
   function login(data) {
     localStorage.setItem("ordens:session", JSON.stringify(data));
     setSession(data);
+    setSignatureName(data.user.name);
   }
 
   async function loadData() {
     if (!session) return;
 
-    const [orderList, signerList] = await Promise.all([
-      api.request("/orders"),
-      api.request("/users/signers")
-    ]);
+    const orderList = await api.request("/orders");
     setOrders(orderList);
-    setSigners(signerList);
 
     if (session.user.role === "admin") {
       setUsers(await api.request("/users"));
@@ -172,6 +191,9 @@ function App() {
   }
 
   useEffect(() => {
+    if (session && !signatureName) {
+      setSignatureName(session.user.name);
+    }
     loadData().catch((err) => setMessage(err.message));
   }, [session]);
 
@@ -182,6 +204,7 @@ function App() {
   function startEdit(order) {
     setEditingId(order.id);
     setForm({
+      orderType: order.order_type ?? "Reparo",
       itemName: order.item_name,
       itemIdentifier: order.item_identifier,
       authorizedPersonName: order.authorized_person_name,
@@ -189,7 +212,8 @@ function App() {
       usageReason: order.usage_reason,
       validFrom: order.valid_from?.slice(0, 10),
       validUntil: order.valid_until?.slice(0, 10),
-      signerId: order.signer_id ?? ""
+      signatureDueAt: order.signature_due_at,
+      destinationRole: order.destination_role ?? "signer"
     });
   }
 
@@ -200,7 +224,10 @@ function App() {
     const path = editingId ? `/orders/${editingId}` : "/orders";
     const saved = await api.request(path, {
       method,
-      body: JSON.stringify({ ...form, signerId: form.signerId || null })
+      body: JSON.stringify({
+        ...form,
+        validUntil: form.validUntil || null
+      })
     });
 
     setForm(emptyOrder);
@@ -232,6 +259,19 @@ function App() {
     setUsers(await api.request("/users"));
   }
 
+  async function updateUser(userId, changes) {
+    await api.request(`/users/${userId}`, {
+      method: "PATCH",
+      body: JSON.stringify(changes)
+    });
+    setUsers(await api.request("/users"));
+  }
+
+  async function removeUser(userId) {
+    await api.request(`/users/${userId}`, { method: "DELETE" });
+    setUsers(await api.request("/users"));
+  }
+
   if (!session) {
     return <Login onLogin={login} />;
   }
@@ -260,7 +300,7 @@ function App() {
         <header className="topbar">
           <div>
             <h1>Historico de ordens</h1>
-            <p className="muted">Acoes e assinaturas ficam registradas em cada ordem.</p>
+            <p className="muted">A aprovacao exige duas assinaturas registradas.</p>
           </div>
           {message && <span className="toast">{message}</span>}
         </header>
@@ -271,7 +311,6 @@ function App() {
               <OrderForm
                 form={form}
                 setForm={setForm}
-                signers={signers}
                 editingId={editingId}
                 onSubmit={saveOrder}
                 onCancel={() => {
@@ -302,8 +341,10 @@ function App() {
             selected={selected}
             feedback={feedback}
             setFeedback={setFeedback}
+            signatureName={signatureName}
+            setSignatureName={setSignatureName}
             onSubmit={() => runOrderAction(`/orders/${selected.id}/submit`)}
-            onSign={() => runOrderAction(`/orders/${selected.id}/sign`)}
+            onSign={() => runOrderAction(`/orders/${selected.id}/sign`, { signerName: signatureName })}
             onCorrection={() => {
               runOrderAction(`/orders/${selected.id}/request-correction`, { message: feedback });
               setFeedback("");
@@ -312,7 +353,15 @@ function App() {
           />
 
           {session.user.role === "admin" && (
-            <AdminPanel users={users} newUser={newUser} setNewUser={setNewUser} onSubmit={createUser} />
+            <AdminPanel
+              users={users}
+              currentUserId={session.user.id}
+              newUser={newUser}
+              setNewUser={setNewUser}
+              onSubmit={createUser}
+              onUpdateUser={updateUser}
+              onRemoveUser={removeUser}
+            />
           )}
         </div>
       </section>
@@ -320,7 +369,7 @@ function App() {
   );
 }
 
-function OrderForm({ form, setForm, signers, editingId, onSubmit, onCancel }) {
+function OrderForm({ form, setForm, editingId, onSubmit, onCancel }) {
   function update(field, value) {
     setForm((current) => ({ ...current, [field]: value }));
   }
@@ -333,41 +382,54 @@ function OrderForm({ form, setForm, signers, editingId, onSubmit, onCancel }) {
       </div>
       <div className="two-columns">
         <label>
-          Item
+          Tipo da ordem
+          <select value={form.orderType} onChange={(event) => update("orderType", event.target.value)} required>
+            {orderTypeOptions.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Nota do Pedido
           <input value={form.itemName} onChange={(event) => update("itemName", event.target.value)} required />
         </label>
         <label>
           Modelo do Terminal
-          <input value={form.itemIdentifier} onChange={(event) => update("itemIdentifier", event.target.value)} required />
+          <select value={form.itemIdentifier} onChange={(event) => update("itemIdentifier", event.target.value)} required>
+            {terminalModelOptions.map((model) => (
+              <option key={model} value={model}>{model}</option>
+            ))}
+          </select>
         </label>
         <label>
           Solicitante
           <input value={form.authorizedPersonName} onChange={(event) => update("authorizedPersonName", event.target.value)} required />
         </label>
         <label>
-          Nº OS
+          N OS
           <input value={form.authorizedPersonDocument} onChange={(event) => update("authorizedPersonDocument", event.target.value)} required />
         </label>
         <label>
-          Data Solicitação
+          Data Solicitacao
           <input type="date" value={form.validFrom} onChange={(event) => update("validFrom", event.target.value)} required />
         </label>
-        <label>
-          Prazo Assinatura
-          <input type="date" value={form.validUntil} onChange={(event) => update("validUntil", event.target.value)} required />
-        </label>
+      </div>
+      <div className="auto-field">
+        <span>Prazo Assinatura</span>
+        <strong>{editingId && form.signatureDueAt ? formatDateTime(form.signatureDueAt) : formatDate(tomorrow())}</strong>
       </div>
       <label>
-        Assinante
-        <select value={form.signerId} onChange={(event) => update("signerId", event.target.value)}>
-          <option value="">Selecionar depois</option>
-          {signers.map((signer) => (
-            <option key={signer.id} value={signer.id}>{signer.name}</option>
+        Destinatario
+        <select value={form.destinationRole} onChange={(event) => update("destinationRole", event.target.value)} required>
+          {destinationOptions.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
           ))}
-        </select>
+          </select>
       </label>
       <label>
-        Configuração
+        Configuracao
         <textarea value={form.usageReason} onChange={(event) => update("usageReason", event.target.value)} required />
       </label>
       <div className="actions">
@@ -389,27 +451,42 @@ function OrderRow({ order, active, onClick }) {
       <span className={`status-dot ${order.status}`}><Icon size={15} /></span>
       <span>
         <strong>{order.code}</strong>
-        <small>{order.item_name} · {order.authorized_person_name}</small>
+        <small>{typeLabel(order.order_type)} | {order.item_name} | {order.authorized_person_name}</small>
       </span>
-      <em>{statusLabels[order.status]}</em>
+      <em>{statusLabels[order.status]} ({order.signature_count ?? 0}/2)</em>
     </button>
   );
 }
 
-function OrderDetails({ session, selected, feedback, setFeedback, onSubmit, onSign, onCorrection, onEdit }) {
+function OrderDetails({
+  session,
+  selected,
+  feedback,
+  setFeedback,
+  signatureName,
+  setSignatureName,
+  onSubmit,
+  onSign,
+  onCorrection,
+  onEdit
+}) {
   if (!selected) {
     return (
       <section className="panel empty-state">
         <History size={34} />
         <h3>Selecione uma ordem</h3>
-        <p className="muted">O detalhe mostra dados, assinatura e historico da autorizacao.</p>
+        <p className="muted">O detalhe mostra dados, assinaturas e historico da autorizacao.</p>
       </section>
     );
   }
 
+  const signatures = selected.signatures ?? [];
+  const signedUserIds = signatures.map((signature) => signature.signer_id);
+  const isRecipient = selected.destination_role === session.user.role;
+  const hasCurrentUserSigned = signedUserIds.includes(session.user.id);
   const canEdit = ["admin", "requester"].includes(session.user.role) && ["draft", "correction_requested"].includes(selected.status);
-  const canSubmit = canEdit && selected.signer_id;
-  const canReview = ["admin", "signer"].includes(session.user.role) && selected.status === "pending_signature";
+  const canSubmit = canEdit;
+  const canReview = selected.status === "pending_signature" && !hasCurrentUserSigned && isRecipient;
 
   return (
     <section className="panel detail-panel">
@@ -417,7 +494,7 @@ function OrderDetails({ session, selected, feedback, setFeedback, onSubmit, onSi
         <div>
           <p className="eyebrow">{selected.code}</p>
           <h2>{selected.item_name}</h2>
-          <p className="muted">{statusLabels[selected.status]}</p>
+          <p className="muted">{statusLabels[selected.status]} | {signatures.length}/2 assinaturas</p>
         </div>
         {canEdit && (
           <button className="ghost icon-button" onClick={() => onEdit(selected)} title="Editar">
@@ -427,16 +504,19 @@ function OrderDetails({ session, selected, feedback, setFeedback, onSubmit, onSi
       </div>
 
       <dl className="info-grid">
-        <div><dt>Identificador</dt><dd>{selected.item_identifier}</dd></div>
-        <div><dt>Pessoa autorizada</dt><dd>{selected.authorized_person_name}</dd></div>
-        <div><dt>Documento</dt><dd>{selected.authorized_person_document}</dd></div>
-        <div><dt>Solicitante</dt><dd>{selected.requester_name}</dd></div>
-        <div><dt>Assinante</dt><dd>{selected.signer_name ?? "Nao definido"}</dd></div>
-        <div><dt>Validade</dt><dd>{formatDate(selected.valid_from)} ate {formatDate(selected.valid_until)}</dd></div>
+        <div><dt>Tipo da ordem</dt><dd>{typeLabel(selected.order_type)}</dd></div>
+        <div><dt>Modelo do Terminal</dt><dd>{selected.item_identifier}</dd></div>
+        <div><dt>Solicitante</dt><dd>{selected.authorized_person_name}</dd></div>
+        <div><dt>N OS</dt><dd>{selected.authorized_person_document}</dd></div>
+        <div><dt>Criada por</dt><dd>{selected.requester_name}</dd></div>
+        <div><dt>Data Solicitacao</dt><dd>{formatDate(selected.valid_from)}</dd></div>
+        <div><dt>Destinatario</dt><dd>{destinationLabel(selected.destination_role)}</dd></div>
+        <div><dt>Prazo Assinatura</dt><dd>{formatDateTime(selected.signature_due_at)}</dd></div>
+        <div><dt>Aprovacao</dt><dd>{signatures.length >= 2 ? "Completa" : `${signatures.length}/2 assinaturas`}</dd></div>
       </dl>
 
       <div>
-        <h3>Justificativa</h3>
+        <h3>Configuracao</h3>
         <p>{selected.usage_reason}</p>
       </div>
 
@@ -447,16 +527,22 @@ function OrderDetails({ session, selected, feedback, setFeedback, onSubmit, onSi
             Enviar
           </button>
         )}
-        {canReview && (
-          <button className="success" onClick={onSign}>
-            <CheckCircle2 size={18} />
-            Assinar
-          </button>
-        )}
       </div>
+
+      {selected.status === "pending_signature" && hasCurrentUserSigned && (
+        <p className="inline-note">Sua assinatura ja foi registrada. A ordem ainda aguarda a outra assinatura.</p>
+      )}
 
       {canReview && (
         <div className="feedback-box">
+          <label>
+            Nome de quem assinou
+            <input value={signatureName} onChange={(event) => setSignatureName(event.target.value)} />
+          </label>
+          <button className="success" onClick={onSign} disabled={signatureName.trim().length < 2}>
+            <CheckCircle2 size={18} />
+            Assinar
+          </button>
           <textarea
             placeholder="Descreva o que precisa ser corrigido"
             value={feedback}
@@ -469,15 +555,20 @@ function OrderDetails({ session, selected, feedback, setFeedback, onSubmit, onSi
         </div>
       )}
 
-      {selected.signatures?.length > 0 && (
-        <section className="signature-box">
-          <ShieldCheck size={20} />
-          <div>
-            <strong>Assinatura digital registrada</strong>
-            <small>{selected.signatures[0].signature_hash}</small>
-          </div>
-        </section>
-      )}
+      <section className="signature-list">
+        <h3>Assinaturas registradas</h3>
+        {signatures.length === 0 && <p className="muted">Nenhuma assinatura registrada.</p>}
+        {signatures.map((signature) => (
+          <article className="signature-box" key={signature.id}>
+            <ShieldCheck size={20} />
+            <div>
+              <strong>{signature.display_signer_name ?? signature.user_name}</strong>
+              <span>{formatDateTime(signature.signed_at)}</span>
+              <small>{signature.signature_hash}</small>
+            </div>
+          </article>
+        ))}
+      </section>
 
       <section>
         <h3>Historico</h3>
@@ -488,7 +579,7 @@ function OrderDetails({ session, selected, feedback, setFeedback, onSubmit, onSi
               <div>
                 <strong>{event.event_type}</strong>
                 <p>{event.message}</p>
-                <small>{event.actor_name} · {formatDateTime(event.created_at)}</small>
+                <small>{event.actor_name} | {formatDateTime(event.created_at)}</small>
               </div>
             </article>
           ))}
@@ -498,7 +589,7 @@ function OrderDetails({ session, selected, feedback, setFeedback, onSubmit, onSi
   );
 }
 
-function AdminPanel({ users, newUser, setNewUser, onSubmit }) {
+function AdminPanel({ users, currentUserId, newUser, setNewUser, onSubmit, onUpdateUser, onRemoveUser }) {
   function update(field, value) {
     setNewUser((current) => ({ ...current, [field]: value }));
   }
@@ -514,9 +605,9 @@ function AdminPanel({ users, newUser, setNewUser, onSubmit }) {
         <input placeholder="Email" value={newUser.email} onChange={(event) => update("email", event.target.value)} required />
         <input placeholder="Senha inicial" value={newUser.password} onChange={(event) => update("password", event.target.value)} required />
         <select value={newUser.role} onChange={(event) => update("role", event.target.value)}>
-          <option value="requester">Solicitante</option>
-          <option value="signer">Assinante</option>
-          <option value="admin">Admin</option>
+          {roleOptions.map((role) => (
+            <option key={role.value} value={role.value}>{role.label}</option>
+          ))}
         </select>
         <button className="primary" type="submit">
           <UserPlus size={18} />
@@ -525,14 +616,62 @@ function AdminPanel({ users, newUser, setNewUser, onSubmit }) {
       </form>
       <div className="user-list">
         {users.map((user) => (
-          <div key={user.id}>
-            <strong>{user.name}</strong>
-            <small>{user.email} · {user.role}</small>
-          </div>
+          <article className={!user.active ? "inactive-user" : ""} key={user.id}>
+            <div>
+              <strong>{user.name}</strong>
+              <small>{user.email} | {roleLabel(user.role)} | {user.active ? "ativo" : "removido"}</small>
+            </div>
+            <select
+              value={user.role}
+              disabled={user.id === currentUserId || !user.active}
+              onChange={(event) => onUpdateUser(user.id, { role: event.target.value })}
+              title="Alterar tipo"
+            >
+              {roleOptions.map((role) => (
+                <option key={role.value} value={role.value}>{role.label}</option>
+              ))}
+            </select>
+            {user.active ? (
+              <button
+                className="danger icon-button"
+                disabled={user.id === currentUserId}
+                onClick={() => onRemoveUser(user.id)}
+                title="Remover usuario"
+              >
+                <Trash2 size={18} />
+              </button>
+            ) : (
+              <button
+                className="ghost icon-button"
+                onClick={() => onUpdateUser(user.id, { active: true })}
+                title="Reativar usuario"
+              >
+                <Save size={18} />
+              </button>
+            )}
+          </article>
         ))}
       </div>
     </section>
   );
+}
+
+function tomorrow() {
+  const date = new Date();
+  date.setDate(date.getDate() + 1);
+  return date;
+}
+
+function typeLabel(value) {
+  return orderTypeOptions.find((option) => option.value === value)?.label ?? value ?? "-";
+}
+
+function roleLabel(value) {
+  return roleOptions.find((option) => option.value === value)?.label ?? value ?? "-";
+}
+
+function destinationLabel(value) {
+  return destinationOptions.find((option) => option.value === value)?.label ?? roleLabel(value);
 }
 
 function formatDate(value) {

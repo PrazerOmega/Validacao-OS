@@ -6,6 +6,8 @@ EXCEPTION
   WHEN duplicate_object THEN null;
 END $$;
 
+ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'spectator';
+
 DO $$ BEGIN
   CREATE TYPE order_status AS ENUM ('draft', 'pending_signature', 'correction_requested', 'signed', 'cancelled');
 EXCEPTION
@@ -21,6 +23,28 @@ CREATE TABLE IF NOT EXISTS users (
   active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS order_types (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  name TEXT NOT NULL UNIQUE,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS terminal_models (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  name TEXT NOT NULL UNIQUE,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO order_types (name)
+VALUES ('Reparo'), ('Atualizacao'), ('Teste')
+ON CONFLICT (name) DO NOTHING;
+
+INSERT INTO terminal_models (name)
+VALUES ('D195'), ('S920'), ('Q92x'), ('A910'), ('P2')
+ON CONFLICT (name) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS service_orders (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -43,6 +67,18 @@ CREATE TABLE IF NOT EXISTS service_orders (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS order_items (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  service_order_id UUID NOT NULL REFERENCES service_orders(id) ON DELETE CASCADE,
+  item_name TEXT NOT NULL,
+  terminal_model TEXT NOT NULL,
+  part_number TEXT NOT NULL,
+  client_name TEXT NOT NULL,
+  quantity INTEGER NOT NULL CHECK (quantity > 0),
+  configuration TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 ALTER TABLE service_orders ADD COLUMN IF NOT EXISTS order_type TEXT NOT NULL DEFAULT 'Reparo';
 ALTER TABLE service_orders ADD COLUMN IF NOT EXISTS destination_role user_role;
 ALTER TABLE service_orders ADD COLUMN IF NOT EXISTS signature_due_at TIMESTAMPTZ;
@@ -54,10 +90,16 @@ ALTER TABLE service_orders ALTER COLUMN signature_due_at SET DEFAULT (NOW() + IN
 UPDATE service_orders SET signature_due_at = created_at + INTERVAL '1 day' WHERE signature_due_at IS NULL;
 ALTER TABLE service_orders ALTER COLUMN signature_due_at SET NOT NULL;
 ALTER TABLE service_orders DROP CONSTRAINT IF EXISTS service_orders_order_type_check;
-ALTER TABLE service_orders ADD CONSTRAINT service_orders_order_type_check CHECK (order_type IN ('Reparo', 'Atualizacao', 'Teste'));
 ALTER TABLE service_orders DROP CONSTRAINT IF EXISTS service_orders_item_identifier_check;
-UPDATE service_orders SET item_identifier = 'D195' WHERE item_identifier NOT IN ('D195', 'S920', 'Q92x', 'A910', 'P2');
-ALTER TABLE service_orders ADD CONSTRAINT service_orders_item_identifier_check CHECK (item_identifier IN ('D195', 'S920', 'Q92x', 'A910', 'P2'));
+
+INSERT INTO order_items (
+  service_order_id, item_name, terminal_model, part_number, client_name, quantity, configuration
+)
+SELECT id, item_name, item_identifier, '-', '-', 1, usage_reason
+FROM service_orders so
+WHERE NOT EXISTS (
+  SELECT 1 FROM order_items oi WHERE oi.service_order_id = so.id
+);
 
 CREATE TABLE IF NOT EXISTS order_events (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -88,5 +130,6 @@ CREATE INDEX IF NOT EXISTS idx_service_orders_requester ON service_orders(reques
 CREATE INDEX IF NOT EXISTS idx_service_orders_destination_role ON service_orders(destination_role);
 CREATE INDEX IF NOT EXISTS idx_service_orders_signer ON service_orders(signer_id);
 CREATE INDEX IF NOT EXISTS idx_service_orders_second_signer ON service_orders(second_signer_id);
+CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(service_order_id);
 CREATE INDEX IF NOT EXISTS idx_order_events_order ON order_events(service_order_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_order_signatures_order_signer ON order_signatures(service_order_id, signer_id);

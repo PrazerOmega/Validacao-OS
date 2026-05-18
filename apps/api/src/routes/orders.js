@@ -7,16 +7,23 @@ import { buildSignature } from "../utils/signature.js";
 
 export const ordersRouter = express.Router();
 
+const orderItemSchema = z.object({
+  itemName: z.string().min(1),
+  itemIdentifier: z.string().trim().min(1),
+  partNumber: z.string().trim().min(1),
+  clientName: z.string().trim().min(1),
+  quantity: z.coerce.number().int().positive(),
+  configuration: z.string().min(1)
+});
+
 const orderSchema = z.object({
-  orderType: z.enum(["Reparo", "Atualizacao", "Teste"]),
-  itemName: z.string().min(2),
-  itemIdentifier: z.enum(["D195", "S920", "Q92x", "A910", "P2"]),
+  orderType: z.string().trim().min(1),
   authorizedPersonName: z.string().min(2),
   authorizedPersonDocument: z.string().min(3),
-  usageReason: z.string().min(5),
   validFrom: z.string().min(10),
   validUntil: z.string().min(10).optional().nullable(),
-  destinationRole: z.enum(["signer"]).default("signer")
+  destinationRole: z.enum(["signer"]).default("signer"),
+  items: z.array(orderItemSchema).min(1)
 });
 
 const feedbackSchema = z.object({
@@ -30,6 +37,7 @@ const signatureSchema = z.object({
 function canSeeOrder(user, order) {
   return (
     user.role === "admin" ||
+    user.role === "spectator" ||
     order.requester_id === user.id ||
     order.destination_role === user.role
   );
@@ -52,6 +60,48 @@ function defaultValidUntil() {
   return date.toISOString().slice(0, 10);
 }
 
+async function validateCatalogOptions(values) {
+  const [orderType, terminalModels] = await Promise.all([
+    query("SELECT id FROM order_types WHERE name = $1 AND active = TRUE", [values.orderType]),
+    query("SELECT name FROM terminal_models WHERE active = TRUE")
+  ]);
+
+  if (!orderType.rows[0]) {
+    return "Tipo de ordem nao cadastrado.";
+  }
+
+  const validModels = new Set(terminalModels.rows.map((row) => row.name));
+  const invalidModel = values.items.find((item) => !validModels.has(item.itemIdentifier));
+
+  if (invalidModel) {
+    return `Modelo do terminal nao cadastrado: ${invalidModel.itemIdentifier}.`;
+  }
+
+  return null;
+}
+
+async function replaceOrderItems(orderId, items) {
+  await query("DELETE FROM order_items WHERE service_order_id = $1", [orderId]);
+
+  for (const item of items) {
+    await query(
+      `INSERT INTO order_items (
+         service_order_id, item_name, terminal_model, part_number, client_name, quantity, configuration
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        orderId,
+        item.itemName,
+        item.itemIdentifier,
+        item.partNumber,
+        item.clientName,
+        item.quantity,
+        item.configuration
+      ]
+    );
+  }
+}
+
 ordersRouter.get("/", async (req, res) => {
   const filters = [];
   const params = [];
@@ -66,13 +116,21 @@ ordersRouter.get("/", async (req, res) => {
     filters.push(`so.destination_role = $${params.length}`);
   }
 
+  if (req.user.role === "spectator") {
+    filters.push("TRUE");
+  }
+
   const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
   const { rows } = await query(
     `SELECT so.*, requester.name AS requester_name,
-            COUNT(os.id)::int AS signature_count
+            (SELECT COALESCE(SUM(quantity), 0)::int FROM order_items WHERE service_order_id = so.id) AS total_quantity,
+            (SELECT COUNT(*)::int FROM order_items WHERE service_order_id = so.id) AS item_count,
+            (SELECT STRING_AGG(DISTINCT terminal_model, ', ') FROM order_items WHERE service_order_id = so.id) AS terminal_models,
+            (SELECT STRING_AGG(DISTINCT part_number, ', ') FROM order_items WHERE service_order_id = so.id) AS part_numbers,
+            (SELECT STRING_AGG(DISTINCT client_name, ', ') FROM order_items WHERE service_order_id = so.id) AS client_names,
+            (SELECT COUNT(*)::int FROM order_signatures WHERE service_order_id = so.id) AS signature_count
      FROM service_orders so
      JOIN users requester ON requester.id = so.requester_id
-     LEFT JOIN order_signatures os ON os.service_order_id = so.id
      ${where}
      GROUP BY so.id, requester.name
      ORDER BY so.updated_at DESC`,
@@ -91,6 +149,13 @@ ordersRouter.post("/", requireRole("requester", "admin"), async (req, res) => {
 
   const code = `OS-${Date.now()}`;
   const values = parsed.data;
+  const firstItem = values.items[0];
+  const catalogError = await validateCatalogOptions(values);
+
+  if (catalogError) {
+    return res.status(400).json({ message: catalogError });
+  }
+
   const { rows } = await query(
     `INSERT INTO service_orders (
        code, order_type, item_name, item_identifier, authorized_person_name,
@@ -102,17 +167,19 @@ ordersRouter.post("/", requireRole("requester", "admin"), async (req, res) => {
     [
       code,
       values.orderType,
-      values.itemName,
-      values.itemIdentifier,
+      firstItem.itemName,
+      firstItem.itemIdentifier,
       values.authorizedPersonName,
       values.authorizedPersonDocument,
-      values.usageReason,
+      firstItem.configuration,
       values.validFrom,
       values.validUntil ?? defaultValidUntil(),
       req.user.id,
       values.destinationRole
     ]
   );
+
+  await replaceOrderItems(rows[0].id, values.items);
 
   await addOrderEvent({
     orderId: rows[0].id,
@@ -135,7 +202,7 @@ ordersRouter.get("/:id", async (req, res) => {
     return res.status(403).json({ message: "Permissao insuficiente." });
   }
 
-  const [events, signatures] = await Promise.all([
+  const [events, signatures, items] = await Promise.all([
     query(
       `SELECT oe.*, users.name AS actor_name
        FROM order_events oe
@@ -152,10 +219,17 @@ ordersRouter.get("/:id", async (req, res) => {
        WHERE service_order_id = $1
        ORDER BY os.signed_at DESC`,
       [order.id]
+    ),
+    query(
+      `SELECT id, item_name, terminal_model, part_number, client_name, quantity, configuration, created_at
+       FROM order_items
+       WHERE service_order_id = $1
+       ORDER BY created_at ASC, id ASC`,
+      [order.id]
     )
   ]);
 
-  return res.json({ ...order, events: events.rows, signatures: signatures.rows });
+  return res.json({ ...order, events: events.rows, signatures: signatures.rows, items: items.rows });
 });
 
 ordersRouter.put("/:id", requireRole("requester", "admin"), async (req, res) => {
@@ -180,6 +254,13 @@ ordersRouter.put("/:id", requireRole("requester", "admin"), async (req, res) => 
   }
 
   const values = parsed.data;
+  const firstItem = values.items[0];
+  const catalogError = await validateCatalogOptions(values);
+
+  if (catalogError) {
+    return res.status(400).json({ message: catalogError });
+  }
+
   const { rows } = await query(
     `UPDATE service_orders
      SET order_type = $1, item_name = $2, item_identifier = $3, authorized_person_name = $4,
@@ -189,17 +270,19 @@ ordersRouter.put("/:id", requireRole("requester", "admin"), async (req, res) => 
      RETURNING *`,
     [
       values.orderType,
-      values.itemName,
-      values.itemIdentifier,
+      firstItem.itemName,
+      firstItem.itemIdentifier,
       values.authorizedPersonName,
       values.authorizedPersonDocument,
-      values.usageReason,
+      firstItem.configuration,
       values.validFrom,
       values.validUntil ?? order.valid_until ?? defaultValidUntil(),
       values.destinationRole,
       order.id
     ]
   );
+
+  await replaceOrderItems(order.id, values.items);
 
   await addOrderEvent({
     orderId: order.id,

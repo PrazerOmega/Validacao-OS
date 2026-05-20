@@ -148,8 +148,8 @@ function Login({ onLogin }) {
       <section className="login-panel">
         <div>
           <p className="eyebrow">Controle de autorizacoes</p>
-          <h1>Ordens de Servico Digitais</h1>
-          <p className="muted">Crie, acompanhe, devolva para correcao e assine ordens com trilha de auditoria.</p>
+          <h1>Ordens de Serviço</h1>
+          <p className="muted"></p>
         </div>
         <form onSubmit={submit} className="stack">
           <label>
@@ -188,6 +188,7 @@ function App() {
   const [newCatalogItem, setNewCatalogItem] = useState({ orderType: "", terminalModel: "" });
   const [message, setMessage] = useState("");
   const [adminMenu, setAdminMenu] = useState("orders");
+  const [userMenu, setUserMenu] = useState("create");
 
   const api = useApi(session, logout);
 
@@ -364,6 +365,14 @@ function App() {
             </button>
           </nav>
         )}
+        {!isAdmin && (
+          <nav className="sidebar-menu" aria-label="Menus do usuario">
+            <button className={userMenu === "orders" ? "active" : ""} onClick={() => setUserMenu("orders")}>
+              <ClipboardList size={18} />
+              Ordens de servico
+            </button>
+          </nav>
+        )}
         <button className="ghost" onClick={logout}>
           <LogOut size={18} />
           Sair
@@ -410,6 +419,25 @@ function App() {
             }}
             onEditOrder={startEdit}
             session={session}
+          />
+        ) : userMenu === "orders" || !canCreate ? (
+          <UserOrdersPanel
+            orders={orders}
+            selected={selected}
+            session={session}
+            feedback={feedback}
+            setFeedback={setFeedback}
+            signatureName={signatureName}
+            setSignatureName={setSignatureName}
+            onSelectOrder={selectOrder}
+            onNewOrder={() => setUserMenu("create")}
+            onSubmit={() => runOrderAction(`/orders/${selected.id}/submit`)}
+            onSign={() => runOrderAction(`/orders/${selected.id}/sign`, { signerName: signatureName })}
+            onCorrection={() => {
+              runOrderAction(`/orders/${selected.id}/request-correction`, { message: feedback });
+              setFeedback("");
+            }}
+            onEdit={startEdit}
           />
         ) : (
           <div className="content-grid">
@@ -516,20 +544,16 @@ function OrderForm({ form, setForm, catalog, editingId, onSubmit, onCancel }) {
           N OS
           <input value={form.authorizedPersonDocument} onChange={(event) => update("authorizedPersonDocument", event.target.value)} required />
         </label>
-        <label>
-          Data Solicitacao
-          <input type="date" value={form.validFrom} onChange={(event) => update("validFrom", event.target.value)} required />
-        </label>
-        <label>
-          Destinatario
-          <select value={form.destinationRole} onChange={(event) => update("destinationRole", event.target.value)} required>
-            {destinationOptions.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </label>
+      </div>
+      <div className="two-columns">
+        <div className="auto-field">
+          <span>Data Solicitacao</span>
+          <strong>{editingId && form.validFrom ? formatDate(form.validFrom) : formatDate(today())}</strong>
+        </div>
+        <div className="auto-field">
+          <span>Destinatario</span>
+          <strong>Suporte</strong>
+        </div>
       </div>
       <div className="auto-field">
         <span>Prazo Assinatura</span>
@@ -593,6 +617,84 @@ function OrderForm({ form, setForm, catalog, editingId, onSubmit, onCancel }) {
         </button>
       </div>
     </form>
+  );
+}
+
+function UserOrdersPanel({
+  orders,
+  selected,
+  session,
+  feedback,
+  setFeedback,
+  signatureName,
+  setSignatureName,
+  onSelectOrder,
+  onNewOrder,
+  onSubmit,
+  onSign,
+  onCorrection,
+  onEdit
+}) {
+  const [filter, setFilter] = useState("sem_assinatura");
+  const filteredOrders = orders.filter((order) => userOrderMatchesFilter(order, filter));
+  const filterOptions = [
+    { value: "sem_assinatura", label: "SEM ASSINATURA" },
+    { value: "aguardando_1", label: "AGUARDANDO 1 ASSINATURA" },
+    { value: "signed", label: "ASSINADAS" },
+    { value: "recertificar", label: "RESERTIFICAR" }
+  ];
+
+  return (
+    <div className="content-grid user-orders-layout">
+      <section className="orders-column">
+        <div className="panel user-orders-panel">
+          <div className="panel-title">
+            <ClipboardList size={18} />
+            <h3>Ordens de servico</h3>
+          </div>
+          <div className="user-order-filters">
+            {filterOptions.map((option) => (
+              <button
+                className={filter === option.value ? "active" : ""}
+                key={option.value}
+                onClick={() => setFilter(option.value)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+          {session.user.role === "requester" && (
+            <button className="primary" onClick={onNewOrder}>
+              <Plus size={18} />
+              Nova ordem
+            </button>
+          )}
+        </div>
+        <div className="order-list">
+          {filteredOrders.map((order) => (
+            <OrderRow
+              key={order.id}
+              order={order}
+              active={selected?.id === order.id}
+              onClick={() => onSelectOrder(order)}
+            />
+          ))}
+          {filteredOrders.length === 0 && <p className="muted">Nenhuma ordem encontrada neste filtro.</p>}
+        </div>
+      </section>
+      <OrderDetails
+        session={session}
+        selected={selected}
+        feedback={feedback}
+        setFeedback={setFeedback}
+        signatureName={signatureName}
+        setSignatureName={setSignatureName}
+        onSubmit={onSubmit}
+        onSign={onSign}
+        onCorrection={onCorrection}
+        onEdit={onEdit}
+      />
+    </div>
   );
 }
 
@@ -665,6 +767,8 @@ function AdminConsole({
 
 function AdminOrdersPanel({ orders, selected, onSelectOrder }) {
   const [statusFilter, setStatusFilter] = useState("total");
+  const [orderSearch, setOrderSearch] = useState("");
+  const normalizedSearch = orderSearch.trim().toLowerCase();
   const counts = orders.reduce(
     (acc, order) => {
       acc.total += 1;
@@ -673,9 +777,12 @@ function AdminOrdersPanel({ orders, selected, onSelectOrder }) {
     },
     { total: 0, draft: 0, pending_signature: 0, correction_requested: 0, signed: 0, cancelled: 0 }
   );
-  const filteredOrders = statusFilter === "total"
+  const statusFilteredOrders = statusFilter === "total"
     ? orders
     : orders.filter((order) => order.status === statusFilter);
+  const filteredOrders = normalizedSearch
+    ? statusFilteredOrders.filter((order) => orderMatchesSearch(order, normalizedSearch))
+    : statusFilteredOrders;
 
   return (
     <section className="panel admin-orders-panel">
@@ -696,6 +803,26 @@ function AdminOrdersPanel({ orders, selected, onSelectOrder }) {
         </button>
         <button className={statusFilter === "signed" ? "active" : ""} onClick={() => setStatusFilter("signed")}>
           <strong>{counts.signed}</strong><span>Aprovadas</span>
+        </button>
+      </div>
+
+      <div className="search-field orders-search">
+        <Search size={17} />
+        <input
+          placeholder="Pesquisar por OS, tipo, modelo, cliente ou solicitante"
+          value={orderSearch}
+          onChange={(event) => setOrderSearch(event.target.value)}
+        />
+      </div>
+
+      <div className="export-actions">
+        <button className="ghost" type="button" onClick={() => exportOrdersToExcel(filteredOrders, "filtrado")} disabled={filteredOrders.length === 0}>
+          <Save size={18} />
+          Exportar filtrado
+        </button>
+        <button className="ghost" type="button" onClick={() => exportOrdersToExcel(orders, "completo")} disabled={orders.length === 0}>
+          <Save size={18} />
+          Exportar tudo
         </button>
       </div>
 
@@ -1066,6 +1193,10 @@ function tomorrow() {
   return date;
 }
 
+function today() {
+  return new Date();
+}
+
 function typeLabel(value) {
   return orderTypeOptions.find((option) => option.value === value)?.label ?? value ?? "-";
 }
@@ -1098,6 +1229,114 @@ function orderValidationHint(order) {
   }
 
   return "Sem pendencia ativa";
+}
+
+function userOrderMatchesFilter(order, filter) {
+  const signatureCount = Number(order.signature_count ?? 0);
+
+  if (filter === "sem_assinatura") {
+    return order.status === "pending_signature" && signatureCount === 0;
+  }
+
+  if (filter === "aguardando_1") {
+    return order.status === "pending_signature" && signatureCount === 1;
+  }
+
+  if (filter === "signed") {
+    return order.status === "signed";
+  }
+
+  if (filter === "recertificar") {
+    return order.status === "correction_requested";
+  }
+
+  return true;
+}
+
+function orderMatchesSearch(order, search) {
+  const searchableText = [
+    order.code,
+    order.authorized_person_document,
+    order.order_type,
+    typeLabel(order.order_type),
+    order.terminal_models,
+    order.item_identifier,
+    order.client_names,
+    order.authorized_person_name,
+    order.requester_name,
+    order.part_numbers
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  return searchableText.includes(search);
+}
+
+function exportOrdersToExcel(ordersToExport, scope) {
+  if (!ordersToExport.length) return;
+
+  const headers = [
+    "Codigo",
+    "Numero OS",
+    "Tipo",
+    "Status",
+    "Modelos",
+    "Part Numbers",
+    "Clientes",
+    "Solicitante",
+    "Criada por",
+    "Quantia total",
+    "Assinaturas",
+    "Pendencia",
+    "Data solicitacao",
+    "Prazo assinatura"
+  ];
+  const rows = ordersToExport.map((order) => [
+    order.code,
+    order.authorized_person_document,
+    typeLabel(order.order_type),
+    statusLabels[order.status] ?? order.status,
+    order.terminal_models ?? order.item_identifier ?? "",
+    order.part_numbers ?? "",
+    order.client_names ?? "",
+    order.authorized_person_name,
+    order.requester_name,
+    order.total_quantity ?? "",
+    `${order.signature_count ?? 0}/2`,
+    orderValidationHint(order),
+    formatDate(order.valid_from),
+    formatDateTime(order.signature_due_at)
+  ]);
+  const tableRows = [
+    `<tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join("")}</tr>`,
+    ...rows.map((row) => `<tr>${row.map((value) => `<td>${escapeHtml(excelSafeValue(value))}</td>`).join("")}</tr>`)
+  ].join("");
+  const html = `<!doctype html><html><head><meta charset="utf-8" /></head><body><table>${tableRows}</table></body></html>`;
+  const blob = new Blob(["\ufeff", html], { type: "application/vnd.ms-excel;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+
+  link.href = url;
+  link.download = `ordens-servico-${scope}-${new Date().toISOString().slice(0, 10)}.xls`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function excelSafeValue(value) {
+  const text = String(value ?? "");
+  return /^[=+\-@]/.test(text) ? `'${text}` : text;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function orderSummary(order) {

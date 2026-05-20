@@ -20,9 +20,8 @@ const orderSchema = z.object({
   orderType: z.string().trim().min(1),
   authorizedPersonName: z.string().min(2),
   authorizedPersonDocument: z.string().min(3),
-  validFrom: z.string().min(10),
   validUntil: z.string().min(10).optional().nullable(),
-  destinationRole: z.enum(["signer"]).default("signer"),
+  destinationRole: z.enum(["signer"]).optional().default("signer"),
   items: z.array(orderItemSchema).min(1)
 });
 
@@ -162,7 +161,7 @@ ordersRouter.post("/", requireRole("requester", "admin"), async (req, res) => {
        authorized_person_document, usage_reason, valid_from, valid_until,
        requester_id, destination_role
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_DATE, $8, $9, $10)
      RETURNING *`,
     [
       code,
@@ -172,10 +171,9 @@ ordersRouter.post("/", requireRole("requester", "admin"), async (req, res) => {
       values.authorizedPersonName,
       values.authorizedPersonDocument,
       firstItem.configuration,
-      values.validFrom,
       values.validUntil ?? defaultValidUntil(),
       req.user.id,
-      values.destinationRole
+      "signer"
     ]
   );
 
@@ -184,7 +182,7 @@ ordersRouter.post("/", requireRole("requester", "admin"), async (req, res) => {
   await addOrderEvent({
     orderId: rows[0].id,
     actorId: req.user.id,
-    eventType: "created",
+    eventType: "Criação",
     message: "Ordem criada."
   });
 
@@ -275,9 +273,9 @@ ordersRouter.put("/:id", requireRole("requester", "admin"), async (req, res) => 
       values.authorizedPersonName,
       values.authorizedPersonDocument,
       firstItem.configuration,
-      values.validFrom,
+      order.valid_from,
       values.validUntil ?? order.valid_until ?? defaultValidUntil(),
-      values.destinationRole,
+      "signer",
       order.id
     ]
   );
@@ -287,7 +285,7 @@ ordersRouter.put("/:id", requireRole("requester", "admin"), async (req, res) => 
   await addOrderEvent({
     orderId: order.id,
     actorId: req.user.id,
-    eventType: "updated",
+    eventType: "Atualizada",
     message: "Ordem atualizada."
   });
 
@@ -317,7 +315,7 @@ ordersRouter.post("/:id/submit", requireRole("requester", "admin"), async (req, 
   await addOrderEvent({
     orderId: order.id,
     actorId: req.user.id,
-    eventType: "submitted",
+    eventType: "Enviada",
     message: "Ordem enviada para todos os usuarios assinadores."
   });
 
@@ -355,7 +353,7 @@ ordersRouter.post("/:id/request-correction", requireRole("signer"), async (req, 
   await addOrderEvent({
     orderId: order.id,
     actorId: req.user.id,
-    eventType: "correction_requested",
+    eventType: "Correção nescessaria",
     message: parsed.data.message
   });
 
@@ -418,7 +416,7 @@ ordersRouter.post("/:id/sign", requireRole("signer"), async (req, res) => {
   await addOrderEvent({
     orderId: order.id,
     actorId: req.user.id,
-    eventType: "signed",
+    eventType: "Assinada",
     message: signatureCount >= 2 ? "Ordem aprovada com duas assinaturas." : "Primeira assinatura registrada. Aguardando segunda assinatura.",
     metadata: { signatureHash, signerName: parsed.data.signerName, signatureCount }
   });

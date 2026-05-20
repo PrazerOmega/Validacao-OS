@@ -263,6 +263,38 @@ textarea {
   gap: 10px;
 }
 
+.user-orders-layout {
+  grid-template-columns: minmax(340px, 520px) minmax(420px, 1fr);
+}
+
+.user-orders-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.user-order-filters {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.user-order-filters button {
+  min-height: 40px;
+  border: 1px solid #dfe5dd;
+  border-radius: 6px;
+  padding: 0 10px;
+  background: #f7faf7;
+  color: #17211d;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.user-order-filters button.active {
+  background: #166056;
+  border-color: #166056;
+  color: white;
+}
+
 .order-row {
   width: 100%;
   text-align: left;
@@ -600,6 +632,16 @@ dd {
   outline: none;
 }
 
+.orders-search {
+  width: 100%;
+}
+
+.export-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .segmented-control {
   display: inline-flex;
   min-height: 40px;
@@ -728,6 +770,7 @@ dd {
 
 @media (max-width: 1180px) {
   .content-grid,
+  .user-orders-layout,
   .admin-orders-layout,
   .items-grid {
     grid-template-columns: 1fr;

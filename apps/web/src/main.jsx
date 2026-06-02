@@ -53,7 +53,7 @@ const defaultCatalog = {
 const roleOptions = [
   { value: "requester", label: "Operações" },
   { value: "signer", label: "Suporte" },
-  { value: "spectator", label: "Espectador" },
+  { value: "spectator", label: "Produção" },
   { value: "admin", label: "Admin" }
 ];
 
@@ -200,7 +200,7 @@ function App() {
   function login(data) {
     localStorage.setItem("ordens:session", JSON.stringify(data));
     setSession(data);
-    setSignatureName(data.user.name);
+    setSignatureName(data.user.email);
   }
 
   async function loadData() {
@@ -220,7 +220,7 @@ function App() {
 
   useEffect(() => {
     if (session && !signatureName) {
-      setSignatureName(session.user.name);
+      setSignatureName(session.user.email);
     }
     loadData().catch((err) => setMessage(err.message));
   }, [session]);
@@ -345,25 +345,31 @@ function App() {
           <h2>{session.user.name}</h2>
           <span className="role-pill">{session.user.role}</span>
         </div>
-        <button className="ghost" onClick={loadData}>
-          <RefreshCw size={18} />
-          Atualizar
-        </button>
         {isAdmin && (
           <nav className="sidebar-menu" aria-label="Menus do admin">
             <button className={adminMenu === "orders" ? "active" : ""} onClick={() => setAdminMenu("orders")}>
               <ClipboardList size={18} />
               Ordens de servicos
             </button>
-            <button className={adminMenu === "users" ? "active" : ""} onClick={() => setAdminMenu("users")}>
-              <Users size={18} />
-              Usuarios
-            </button>
             <button className={adminMenu === "items" ? "active" : ""} onClick={() => setAdminMenu("items")}>
               <Plus size={18} />
               Inclusao de item
             </button>
+            <button onClick={loadData}>
+              <RefreshCw size={18} />
+              Atualizar
+            </button>
+            <button className={adminMenu === "users" ? "active" : ""} onClick={() => setAdminMenu("users")}>
+              <Users size={18} />
+              Usuario
+            </button>
           </nav>
+        )}
+        {!isAdmin && (
+          <button className="ghost" onClick={loadData}>
+            <RefreshCw size={18} />
+            Atualizar
+          </button>
         )}
         {!isAdmin && (
           <nav className="sidebar-menu" aria-label="Menus do usuario">
@@ -412,7 +418,7 @@ function App() {
             onCreateCatalogItem={createCatalogItem}
             onSelectOrder={selectOrder}
             onSubmitOrder={() => runOrderAction(`/orders/${selected.id}/submit`)}
-            onSignOrder={() => runOrderAction(`/orders/${selected.id}/sign`, { signerName: signatureName })}
+            onSignOrder={() => runOrderAction(`/orders/${selected.id}/sign`, { signerName: session.user.email })}
             onCorrection={() => {
               runOrderAction(`/orders/${selected.id}/request-correction`, { message: feedback });
               setFeedback("");
@@ -432,7 +438,7 @@ function App() {
             onSelectOrder={selectOrder}
             onNewOrder={() => setUserMenu("create")}
             onSubmit={() => runOrderAction(`/orders/${selected.id}/submit`)}
-            onSign={() => runOrderAction(`/orders/${selected.id}/sign`, { signerName: signatureName })}
+            onSign={() => runOrderAction(`/orders/${selected.id}/sign`, { signerName: session.user.email })}
             onCorrection={() => {
               runOrderAction(`/orders/${selected.id}/request-correction`, { message: feedback });
               setFeedback("");
@@ -480,7 +486,7 @@ function App() {
               signatureName={signatureName}
               setSignatureName={setSignatureName}
               onSubmit={() => runOrderAction(`/orders/${selected.id}/submit`)}
-              onSign={() => runOrderAction(`/orders/${selected.id}/sign`, { signerName: signatureName })}
+              onSign={() => runOrderAction(`/orders/${selected.id}/sign`, { signerName: session.user.email })}
               onCorrection={() => {
                 runOrderAction(`/orders/${selected.id}/request-correction`, { message: feedback });
                 setFeedback("");
@@ -956,6 +962,7 @@ function OrderDetails({
   const canEdit = allowEdit && ["admin", "requester"].includes(session.user.role) && ["draft", "correction_requested"].includes(selected.status);
   const canSubmit = canEdit;
   const canReview = selected.status === "pending_signature" && !hasCurrentUserSigned && isRecipient;
+  const signerEmail = session.user.email ?? signatureName;
 
   return (
     <section className="panel detail-panel">
@@ -1028,9 +1035,9 @@ function OrderDetails({
         <div className="feedback-box">
           <label>
             Nome de quem assinou
-            <input value={signatureName} onChange={(event) => setSignatureName(event.target.value)} />
+            <input value={signerEmail} readOnly />
           </label>
-          <button className="success" onClick={onSign} disabled={signatureName.trim().length < 2}>
+          <button className="success" onClick={onSign} disabled={signerEmail.trim().length < 2}>
             <CheckCircle2 size={18} />
             Assinar
           </button>

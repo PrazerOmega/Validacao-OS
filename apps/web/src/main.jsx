@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
+  AlertTriangle,
   CheckCircle2,
   ClipboardList,
   Clock3,
@@ -8,12 +9,14 @@ import {
   FileSignature,
   History,
   LogOut,
+  Moon,
   Plus,
   RefreshCw,
   Save,
   Search,
   Send,
   ShieldCheck,
+  Sun,
   Trash2,
   Users,
   UserPlus,
@@ -25,8 +28,9 @@ const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3333";
 
 const statusLabels = {
   draft: "Rascunho",
-  pending_signature: "Aguardando assinaturas",
-  correction_requested: "Correcao solicitada",
+  pending_signature: "Aguardando validação",
+  correction_requested: "Aguardando correção",
+  divergent: "Divergente",
   signed: "Aprovada",
   cancelled: "Cancelada"
 };
@@ -35,19 +39,21 @@ const statusIcons = {
   draft: Edit3,
   pending_signature: Clock3,
   correction_requested: RefreshCw,
+  divergent: AlertTriangle,
   signed: CheckCircle2,
   cancelled: XCircle
 };
 
 const orderTypeOptions = [
   { value: "Reparo", label: "Reparo" },
-  { value: "Atualizacao", label: "Atualiza\u00e7\u00e3o" },
+  { value: "Atualizacao", label: "Atualização" },
   { value: "Teste", label: "Teste" }
 ];
 
 const defaultCatalog = {
   orderTypes: orderTypeOptions.map((option) => ({ id: option.value, name: option.value })),
-  terminalModels: ["D195", "S920", "Q92x", "A910", "P2"].map((name) => ({ id: name, name }))
+  terminalModels: ["D195", "S920", "Q92x", "A910", "P2"].map((name) => ({ id: name, name })),
+  partNumbers: []
 };
 
 const roleOptions = [
@@ -61,8 +67,6 @@ const destinationOptions = [
   { value: "signer", label: "Suporte" }
 ];
 
-const emptyOrder = createEmptyOrder();
-
 function createEmptyItem() {
   return {
     itemName: "",
@@ -74,10 +78,10 @@ function createEmptyItem() {
   };
 }
 
-function createEmptyOrder() {
+function createEmptyOrder(userName = "") {
   return {
     orderType: "Reparo",
-    authorizedPersonName: "",
+    authorizedPersonName: userName,
     authorizedPersonDocument: "",
     validFrom: "",
     validUntil: "",
@@ -116,7 +120,32 @@ function useApi(session, onUnauthorized) {
   }, [session, onUnauthorized]);
 }
 
-function Login({ onLogin }) {
+function ThemeToggle({ theme, onToggle }) {
+  const isDark = theme === "dark";
+  return (
+    <button
+      type="button"
+      className="theme-switch-btn"
+      onClick={onToggle}
+      role="switch"
+      aria-checked={isDark}
+      aria-label="Alternar tema claro e escuro"
+      title={isDark ? "Mudar para modo claro" : "Mudar para modo escuro"}
+    >
+      <span className={`theme-switch-icon ${!isDark ? "active" : ""}`}>
+        <Sun size={15} />
+      </span>
+      <span className="theme-switch-slider">
+        <span className="theme-switch-thumb" />
+      </span>
+      <span className={`theme-switch-icon ${isDark ? "active" : ""}`}>
+        <Moon size={15} />
+      </span>
+    </button>
+  );
+}
+
+function Login({ onLogin, theme, onToggleTheme }) {
   const [email, setEmail] = useState("solicitante@empresa.com");
   const [password, setPassword] = useState("123456");
   const [error, setError] = useState("");
@@ -145,9 +174,12 @@ function Login({ onLogin }) {
 
   return (
     <main className="login-page">
+      <div className="login-theme-bar">
+        <ThemeToggle theme={theme} onToggle={onToggleTheme} />
+      </div>
       <section className="login-panel">
         <div>
-          <p className="eyebrow">Controle de autorizacoes</p>
+          <p className="eyebrow">Controle de autorizações</p>
           <h1>Ordens de Serviço</h1>
           <p className="muted"></p>
         </div>
@@ -172,6 +204,7 @@ function Login({ onLogin }) {
 }
 
 function App() {
+  const [theme, setTheme] = useState(() => localStorage.getItem("app_theme") || "light");
   const [session, setSession] = useState(() => {
     const stored = localStorage.getItem("ordens:session");
     return stored ? JSON.parse(stored) : null;
@@ -180,17 +213,24 @@ function App() {
   const [selected, setSelected] = useState(null);
   const [users, setUsers] = useState([]);
   const [catalog, setCatalog] = useState(defaultCatalog);
-  const [form, setForm] = useState(emptyOrder);
+  const [form, setForm] = useState(() => createEmptyOrder(session?.user?.name ?? ""));
   const [editingId, setEditingId] = useState(null);
   const [feedback, setFeedback] = useState("");
   const [signatureName, setSignatureName] = useState("");
   const [newUser, setNewUser] = useState({ name: "", email: "", password: "", role: "requester" });
   const [newCatalogItem, setNewCatalogItem] = useState({ orderType: "", terminalModel: "" });
+  const [newPartNumberItem, setNewPartNumberItem] = useState({ modelName: "D195", partNumber: "" });
   const [message, setMessage] = useState("");
+  const [notification, setNotification] = useState(null);
   const [adminMenu, setAdminMenu] = useState("orders");
   const [userMenu, setUserMenu] = useState("create");
 
   const api = useApi(session, logout);
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("app_theme", theme);
+  }, [theme]);
 
   function logout() {
     localStorage.removeItem("ordens:session");
@@ -201,6 +241,7 @@ function App() {
     localStorage.setItem("ordens:session", JSON.stringify(data));
     setSession(data);
     setSignatureName(data.user.name);
+    setForm(createEmptyOrder(data.user.name));
   }
 
   async function loadData() {
@@ -241,21 +282,21 @@ function App() {
       destinationRole: order.destination_role ?? "signer",
       items: order.items?.length
         ? order.items.map((item) => ({
-            itemName: item.item_name,
-            itemIdentifier: item.terminal_model,
-            partNumber: item.part_number,
-            clientName: item.client_name,
-            quantity: item.quantity,
-            configuration: item.configuration
-          }))
+          itemName: item.item_name,
+          itemIdentifier: item.terminal_model,
+          partNumber: item.part_number,
+          clientName: item.client_name,
+          quantity: item.quantity,
+          configuration: item.configuration
+        }))
         : [{
-            itemName: order.item_name,
-            itemIdentifier: order.item_identifier,
-            partNumber: "-",
-            clientName: "-",
-            quantity: 1,
-            configuration: order.usage_reason
-          }]
+          itemName: order.item_name,
+          itemIdentifier: order.item_identifier,
+          partNumber: "-",
+          clientName: "-",
+          quantity: 1,
+          configuration: order.usage_reason
+        }]
     });
   }
 
@@ -272,7 +313,7 @@ function App() {
       })
     });
 
-    setForm(createEmptyOrder());
+    setForm(createEmptyOrder(session?.user?.name ?? ""));
     setEditingId(null);
     await loadData();
     await selectOrder(saved);
@@ -281,13 +322,28 @@ function App() {
 
   async function runOrderAction(path, body) {
     setMessage("");
-    await api.request(path, {
-      method: "POST",
-      body: JSON.stringify(body ?? {})
-    });
-    await loadData();
-    if (selected) {
-      setSelected(await api.request(`/orders/${selected.id}`));
+    try {
+      const result = await api.request(path, {
+        method: "POST",
+        body: JSON.stringify(body ?? {})
+      });
+      if (result?.divergent) {
+        setNotification({
+          type: "warning",
+          title: "Divergência identificada",
+          message: result.message || "A contagem informada diverge da validação anterior. A ordem foi encaminhada para a lista de divergências."
+        });
+      } else {
+        setNotification(null);
+      }
+      await loadData();
+      if (selected) {
+        setSelected(await api.request(`/orders/${selected.id}`));
+      }
+      return result;
+    } catch (err) {
+      setMessage(err.message);
+      throw err;
     }
   }
 
@@ -316,6 +372,20 @@ function App() {
 
   async function createCatalogItem(kind, event) {
     event.preventDefault();
+    if (kind === "part-numbers") {
+      const { modelName, partNumber } = newPartNumberItem;
+      if (!modelName || !partNumber.trim()) return;
+
+      await api.request("/catalog/part-numbers", {
+        method: "POST",
+        body: JSON.stringify({ modelName, partNumber: partNumber.trim() })
+      });
+
+      setNewPartNumberItem((current) => ({ ...current, partNumber: "" }));
+      setCatalog(await api.request("/catalog"));
+      return;
+    }
+
     const field = kind === "order-types" ? "orderType" : "terminalModel";
     const name = newCatalogItem[field].trim();
 
@@ -331,7 +401,13 @@ function App() {
   }
 
   if (!session) {
-    return <Login onLogin={login} />;
+    return (
+      <Login
+        onLogin={login}
+        theme={theme}
+        onToggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+      />
+    );
   }
 
   const canCreate = ["requester", "admin"].includes(session.user.role);
@@ -345,23 +421,19 @@ function App() {
           <h2>{session.user.name}</h2>
           <span className="role-pill">{session.user.role}</span>
         </div>
-        <button className="ghost" onClick={loadData}>
-          <RefreshCw size={18} />
-          Atualizar
-        </button>
         {isAdmin && (
           <nav className="sidebar-menu" aria-label="Menus do admin">
             <button className={adminMenu === "orders" ? "active" : ""} onClick={() => setAdminMenu("orders")}>
               <ClipboardList size={18} />
-              Ordens de servicos
+              Ordens
             </button>
             <button className={adminMenu === "users" ? "active" : ""} onClick={() => setAdminMenu("users")}>
               <Users size={18} />
-              Usuarios
+              Usuários
             </button>
             <button className={adminMenu === "items" ? "active" : ""} onClick={() => setAdminMenu("items")}>
               <Plus size={18} />
-              Inclusao de item
+              Itens
             </button>
           </nav>
         )}
@@ -387,8 +459,28 @@ function App() {
               {isAdmin ? "Gerencie usuarios e acompanhe todas as ordens de servico." : "A aprovacao exige duas assinaturas registradas."}
             </p>
           </div>
-          {message && <span className="toast">{message}</span>}
+          <div className="topbar-actions">
+            {message && <span className="toast">{message}</span>}
+            <ThemeToggle theme={theme} onToggle={() => setTheme((t) => (t === "dark" ? "light" : "dark"))} />
+          </div>
         </header>
+
+        {notification && (
+          <div className={`notification-banner ${notification.type || "warning"}`}>
+            <div className="notification-content">
+              <strong>{notification.title}</strong>
+              <p>{notification.message}</p>
+            </div>
+            <button
+              type="button"
+              className="ghost icon-button"
+              onClick={() => setNotification(null)}
+              aria-label="Fechar aviso"
+            >
+              <XCircle size={18} />
+            </button>
+          </div>
+        )}
 
         {isAdmin ? (
           <AdminConsole
@@ -402,6 +494,8 @@ function App() {
             setNewUser={setNewUser}
             newCatalogItem={newCatalogItem}
             setNewCatalogItem={setNewCatalogItem}
+            newPartNumberItem={newPartNumberItem}
+            setNewPartNumberItem={setNewPartNumberItem}
             feedback={feedback}
             setFeedback={setFeedback}
             signatureName={signatureName}
@@ -412,11 +506,8 @@ function App() {
             onCreateCatalogItem={createCatalogItem}
             onSelectOrder={selectOrder}
             onSubmitOrder={() => runOrderAction(`/orders/${selected.id}/submit`)}
-            onSignOrder={() => runOrderAction(`/orders/${selected.id}/sign`, { signerName: signatureName })}
-            onCorrection={() => {
-              runOrderAction(`/orders/${selected.id}/request-correction`, { message: feedback });
-              setFeedback("");
-            }}
+            onSignOrder={(keyCount) => runOrderAction(`/orders/${selected.id}/sign`, { keyCount: Number(keyCount) })}
+            onCorrection={(msg) => runOrderAction(`/orders/${selected.id}/request-correction`, { message: msg })}
             onEditOrder={startEdit}
             session={session}
           />
@@ -432,11 +523,8 @@ function App() {
             onSelectOrder={selectOrder}
             onNewOrder={() => setUserMenu("create")}
             onSubmit={() => runOrderAction(`/orders/${selected.id}/submit`)}
-            onSign={() => runOrderAction(`/orders/${selected.id}/sign`, { signerName: signatureName })}
-            onCorrection={() => {
-              runOrderAction(`/orders/${selected.id}/request-correction`, { message: feedback });
-              setFeedback("");
-            }}
+            onSign={(keyCount) => runOrderAction(`/orders/${selected.id}/sign`, { keyCount: Number(keyCount) })}
+            onCorrection={(msg) => runOrderAction(`/orders/${selected.id}/request-correction`, { message: msg })}
             onEdit={startEdit}
           />
         ) : (
@@ -451,8 +539,10 @@ function App() {
                   onSubmit={saveOrder}
                   onCancel={() => {
                     setEditingId(null);
-                    setForm(createEmptyOrder());
+                    setForm(createEmptyOrder(session?.user?.name ?? ""));
                   }}
+                  session={session}
+                  api={api}
                 />
               )}
 
@@ -480,11 +570,8 @@ function App() {
               signatureName={signatureName}
               setSignatureName={setSignatureName}
               onSubmit={() => runOrderAction(`/orders/${selected.id}/submit`)}
-              onSign={() => runOrderAction(`/orders/${selected.id}/sign`, { signerName: signatureName })}
-              onCorrection={() => {
-                runOrderAction(`/orders/${selected.id}/request-correction`, { message: feedback });
-                setFeedback("");
-              }}
+              onSign={(keyCount) => runOrderAction(`/orders/${selected.id}/sign`, { keyCount: Number(keyCount) })}
+              onCorrection={(msg) => runOrderAction(`/orders/${selected.id}/request-correction`, { message: msg })}
               onEdit={startEdit}
             />
           </div>
@@ -494,7 +581,37 @@ function App() {
   );
 }
 
-function OrderForm({ form, setForm, catalog, editingId, onSubmit, onCancel }) {
+function OrderForm({ form, setForm, catalog, editingId, onSubmit, onCancel, session, api }) {
+  const [nextCode, setNextCode] = useState("");
+
+  useEffect(() => {
+    if (!editingId && api) {
+      api.request("/orders/next-code")
+        .then((data) => {
+          if (data?.nextCode) setNextCode(data.nextCode);
+        })
+        .catch(() => { });
+    }
+  }, [editingId, api]);
+
+  useEffect(() => {
+    if (catalog.partNumbers?.length) {
+      setForm((current) => {
+        let changed = false;
+        const newItems = current.items.map((item) => {
+          const allowed = catalog.partNumbers.filter((pn) => (pn.model_name || pn.terminal_model_name) === item.itemIdentifier);
+          const hasValid = allowed.some((pn) => pn.part_number === item.partNumber);
+          if (!hasValid && allowed.length > 0) {
+            changed = true;
+            return { ...item, partNumber: allowed[0].part_number };
+          }
+          return item;
+        });
+        return changed ? { ...current, items: newItems } : current;
+      });
+    }
+  }, [catalog.partNumbers]);
+
   function update(field, value) {
     setForm((current) => ({ ...current, [field]: value }));
   }
@@ -509,7 +626,22 @@ function OrderForm({ form, setForm, catalog, editingId, onSubmit, onCancel }) {
   }
 
   function addItem() {
-    setForm((current) => ({ ...current, items: [...current.items, createEmptyItem()] }));
+    const defaultModel = catalog.terminalModels[0]?.name || "D195";
+    const availablePns = (catalog.partNumbers ?? []).filter((pn) => (pn.model_name || pn.terminal_model_name) === defaultModel);
+    setForm((current) => ({
+      ...current,
+      items: [
+        ...current.items,
+        {
+          itemName: "",
+          itemIdentifier: defaultModel,
+          partNumber: availablePns[0]?.part_number || "",
+          clientName: "",
+          quantity: 1,
+          configuration: ""
+        }
+      ]
+    }));
   }
 
   function removeItem(index) {
@@ -527,6 +659,16 @@ function OrderForm({ form, setForm, catalog, editingId, onSubmit, onCancel }) {
         <Plus size={18} />
         <h3>{editingId ? "Editar ordem" : "Nova ordem"}</h3>
       </div>
+      <div className="order-identification-block">
+        <div className="id-card">
+          <span className="id-label">Número da OS</span>
+          <span className="id-value">{editingId ? (form.authorizedPersonDocument || "—") : (nextCode || "Gerando...")}</span>
+        </div>
+        <div className="id-card">
+          <span className="id-label">Solicitante</span>
+          <span className="id-value">{editingId ? (form.authorizedPersonName || session?.user?.name) : (session?.user?.name || "Solicitante")}</span>
+        </div>
+      </div>
       <div className="two-columns">
         <label>
           Tipo da ordem
@@ -536,14 +678,10 @@ function OrderForm({ form, setForm, catalog, editingId, onSubmit, onCancel }) {
             ))}
           </select>
         </label>
-        <label>
-          Solicitante
-          <input value={form.authorizedPersonName} onChange={(event) => update("authorizedPersonName", event.target.value)} required />
-        </label>
-        <label>
-          N OS
-          <input value={form.authorizedPersonDocument} onChange={(event) => update("authorizedPersonDocument", event.target.value)} required />
-        </label>
+        <div className="auto-field">
+          <span>Destinatario</span>
+          <strong>Suporte</strong>
+        </div>
       </div>
       <div className="two-columns">
         <div className="auto-field">
@@ -551,59 +689,92 @@ function OrderForm({ form, setForm, catalog, editingId, onSubmit, onCancel }) {
           <strong>{editingId && form.validFrom ? formatDate(form.validFrom) : formatDate(today())}</strong>
         </div>
         <div className="auto-field">
-          <span>Destinatario</span>
-          <strong>Suporte</strong>
+          <span>Prazo Assinatura</span>
+          <strong>{editingId && form.signatureDueAt ? formatDateTime(form.signatureDueAt) : formatDate(tomorrow())}</strong>
         </div>
-      </div>
-      <div className="auto-field">
-        <span>Prazo Assinatura</span>
-        <strong>{editingId && form.signatureDueAt ? formatDateTime(form.signatureDueAt) : formatDate(tomorrow())}</strong>
       </div>
       <section className="order-items-editor">
         <div className="panel-title">
           <FileSignature size={18} />
           <h3>Itens da OS</h3>
         </div>
-        {form.items.map((item, index) => (
-          <article className="order-item-editor" key={index}>
-            <div className="item-editor-head">
-              <strong>Item {index + 1}</strong>
-              <button type="button" className="ghost icon-button" onClick={() => removeItem(index)} disabled={form.items.length === 1} title="Remover item">
-                <Trash2 size={16} />
-              </button>
-            </div>
-            <div className="two-columns">
+        {form.items.map((item, index) => {
+          const allowedPns = (catalog.partNumbers ?? []).filter(
+            (pn) => (pn.model_name || pn.terminal_model_name) === item.itemIdentifier
+          );
+
+          return (
+            <article className="order-item-editor" key={index}>
+              <div className="item-editor-head">
+                <strong>Item {index + 1}</strong>
+                <button type="button" className="ghost icon-button" onClick={() => removeItem(index)} disabled={form.items.length === 1} title="Remover item">
+                  <Trash2 size={16} />
+                </button>
+              </div>
+              <div className="two-columns">
+                <label>
+                  Nota do Pedido
+                  <input value={item.itemName} onChange={(event) => updateItem(index, "itemName", event.target.value)} required />
+                </label>
+                <label>
+                  Modelo do Terminal
+                  <select
+                    value={item.itemIdentifier}
+                    onChange={(event) => {
+                      const newModel = event.target.value;
+                      const pnsForModel = (catalog.partNumbers ?? []).filter((pn) => (pn.model_name || pn.terminal_model_name) === newModel);
+                      const defaultPn = pnsForModel.length > 0 ? pnsForModel[0].part_number : "";
+                      setForm((current) => ({
+                        ...current,
+                        items: current.items.map((it, i) =>
+                          i === index ? { ...it, itemIdentifier: newModel, partNumber: defaultPn } : it
+                        )
+                      }));
+                    }}
+                    required
+                  >
+                    {catalog.terminalModels.map((model) => (
+                      <option key={model.id} value={model.name}>{model.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Part Number
+                  {allowedPns.length > 0 ? (
+                    <select
+                      value={item.partNumber}
+                      onChange={(event) => updateItem(index, "partNumber", event.target.value)}
+                      required
+                    >
+                      <option value="" disabled>Selecione o Part Number</option>
+                      {allowedPns.map((pn) => (
+                        <option key={pn.id} value={pn.part_number}>
+                          {pn.part_number}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <div className="no-pn-warning">
+                      Nenhum Part Number cadastrado para este modelo.
+                    </div>
+                  )}
+                </label>
+                <label>
+                  Cliente
+                  <input value={item.clientName} onChange={(event) => updateItem(index, "clientName", event.target.value)} required />
+                </label>
+                <label>
+                  Quantia
+                  <input type="number" min="1" value={item.quantity} onChange={(event) => updateItem(index, "quantity", event.target.value)} required />
+                </label>
+              </div>
               <label>
-                Nota do Pedido
-                <input value={item.itemName} onChange={(event) => updateItem(index, "itemName", event.target.value)} required />
+                Configuracao
+                <textarea value={item.configuration} onChange={(event) => updateItem(index, "configuration", event.target.value)} required />
               </label>
-              <label>
-                Modelo do Terminal
-                <select value={item.itemIdentifier} onChange={(event) => updateItem(index, "itemIdentifier", event.target.value)} required>
-                  {catalog.terminalModels.map((model) => (
-                    <option key={model.id} value={model.name}>{model.name}</option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Part Number
-                <input value={item.partNumber} onChange={(event) => updateItem(index, "partNumber", event.target.value)} required />
-              </label>
-              <label>
-                Cliente
-                <input value={item.clientName} onChange={(event) => updateItem(index, "clientName", event.target.value)} required />
-              </label>
-              <label>
-                Quantia
-                <input type="number" min="1" value={item.quantity} onChange={(event) => updateItem(index, "quantity", event.target.value)} required />
-              </label>
-            </div>
-            <label>
-              Configuracao
-              <textarea value={item.configuration} onChange={(event) => updateItem(index, "configuration", event.target.value)} required />
-            </label>
-          </article>
-        ))}
+            </article>
+          );
+        })}
         <button type="button" className="ghost add-item-button" onClick={addItem}>
           <Plus size={18} />
           Adicionar item
@@ -641,7 +812,8 @@ function UserOrdersPanel({
     { value: "sem_assinatura", label: "SEM ASSINATURA" },
     { value: "aguardando_1", label: "AGUARDANDO 1 ASSINATURA" },
     { value: "signed", label: "ASSINADAS" },
-    { value: "recertificar", label: "RESERTIFICAR" }
+    { value: "recertificar", label: "RESERTIFICAR" },
+    { value: "divergent", label: "DIVERGÊNCIAS" }
   ];
 
   return (
@@ -709,6 +881,8 @@ function AdminConsole({
   setNewUser,
   newCatalogItem,
   setNewCatalogItem,
+  newPartNumberItem,
+  setNewPartNumberItem,
   feedback,
   setFeedback,
   signatureName,
@@ -741,6 +915,8 @@ function AdminConsole({
           catalog={catalog}
           newCatalogItem={newCatalogItem}
           setNewCatalogItem={setNewCatalogItem}
+          newPartNumberItem={newPartNumberItem}
+          setNewPartNumberItem={setNewPartNumberItem}
           onCreateCatalogItem={onCreateCatalogItem}
         />
       ) : (
@@ -775,7 +951,7 @@ function AdminOrdersPanel({ orders, selected, onSelectOrder }) {
       acc[order.status] = (acc[order.status] ?? 0) + 1;
       return acc;
     },
-    { total: 0, draft: 0, pending_signature: 0, correction_requested: 0, signed: 0, cancelled: 0 }
+    { total: 0, draft: 0, pending_signature: 0, correction_requested: 0, divergent: 0, signed: 0, cancelled: 0 }
   );
   const statusFilteredOrders = statusFilter === "total"
     ? orders
@@ -793,16 +969,19 @@ function AdminOrdersPanel({ orders, selected, onSelectOrder }) {
 
       <div className="status-summary">
         <button className={statusFilter === "total" ? "active" : ""} onClick={() => setStatusFilter("total")}>
-          <strong>{counts.total}</strong><span>Total</span>
+          <strong>{counts.total}</strong><span>Todas</span>
         </button>
         <button className={statusFilter === "pending_signature" ? "active" : ""} onClick={() => setStatusFilter("pending_signature")}>
-          <strong>{counts.pending_signature}</strong><span>Aguardando</span>
+          <strong>{counts.pending_signature}</strong><span>Aguardando validação</span>
         </button>
         <button className={statusFilter === "correction_requested" ? "active" : ""} onClick={() => setStatusFilter("correction_requested")}>
-          <strong>{counts.correction_requested}</strong><span>Correcao</span>
+          <strong>{counts.correction_requested}</strong><span>Aguardando correção</span>
         </button>
         <button className={statusFilter === "signed" ? "active" : ""} onClick={() => setStatusFilter("signed")}>
           <strong>{counts.signed}</strong><span>Aprovadas</span>
+        </button>
+        <button className={statusFilter === "divergent" ? "active" : ""} onClick={() => setStatusFilter("divergent")}>
+          <strong>{counts.divergent}</strong><span>Divergências</span>
         </button>
       </div>
 
@@ -864,9 +1043,20 @@ function OrderRow({ order, active, onClick }) {
   );
 }
 
-function AdminItemsPanel({ catalog, newCatalogItem, setNewCatalogItem, onCreateCatalogItem }) {
+function AdminItemsPanel({
+  catalog,
+  newCatalogItem,
+  setNewCatalogItem,
+  newPartNumberItem,
+  setNewPartNumberItem,
+  onCreateCatalogItem
+}) {
   function update(field, value) {
     setNewCatalogItem((current) => ({ ...current, [field]: value }));
+  }
+
+  function updatePartNumber(field, value) {
+    setNewPartNumberItem((current) => ({ ...current, [field]: value }));
   }
 
   return (
@@ -887,6 +1077,38 @@ function AdminItemsPanel({ catalog, newCatalogItem, setNewCatalogItem, onCreateC
         onChange={(value) => update("terminalModel", value)}
         onSubmit={(event) => onCreateCatalogItem("terminal-models", event)}
       />
+      <section className="panel catalog-card">
+        <div className="panel-title">
+          <Plus size={18} />
+          <h3>Part Numbers por Modelo</h3>
+        </div>
+        <form className="catalog-form" onSubmit={(event) => onCreateCatalogItem("part-numbers", event)}>
+          <select
+            value={newPartNumberItem?.modelName || (catalog.terminalModels[0]?.name ?? "")}
+            onChange={(e) => updatePartNumber("modelName", e.target.value)}
+            style={{ minWidth: "120px" }}
+          >
+            {catalog.terminalModels.map((model) => (
+              <option key={model.id} value={model.name}>{model.name}</option>
+            ))}
+          </select>
+          <input
+            placeholder="Ex: PN-D195-01"
+            value={newPartNumberItem?.partNumber || ""}
+            onChange={(event) => updatePartNumber("partNumber", event.target.value)}
+            required
+          />
+          <button className="primary" type="submit">
+            <Plus size={18} />
+            Incluir
+          </button>
+        </form>
+        <div className="catalog-list">
+          {(catalog.partNumbers ?? []).map((pn) => (
+            <span key={pn.id}><strong>{pn.model_name || pn.terminal_model_name}</strong>: {pn.part_number}</span>
+          ))}
+        </div>
+      </section>
     </section>
   );
 }
@@ -927,6 +1149,16 @@ function OrderDetails({
   onEdit,
   allowEdit = true
 }) {
+  const [validationDecision, setValidationDecision] = useState(null);
+  const [keyCount, setKeyCount] = useState("");
+  const [correctionMsg, setCorrectionMsg] = useState("");
+
+  useEffect(() => {
+    setValidationDecision(null);
+    setKeyCount("");
+    setCorrectionMsg("");
+  }, [selected?.id]);
+
   if (!selected) {
     return (
       <section className="panel empty-state">
@@ -941,14 +1173,14 @@ function OrderDetails({
   const items = selected.items?.length
     ? selected.items
     : [{
-        id: selected.id,
-        item_name: selected.item_name,
-        terminal_model: selected.item_identifier,
-        part_number: "-",
-        client_name: "-",
-        quantity: 1,
-        configuration: selected.usage_reason
-      }];
+      id: selected.id,
+      item_name: selected.item_name,
+      terminal_model: selected.item_identifier,
+      part_number: "-",
+      client_name: "-",
+      quantity: 1,
+      configuration: selected.usage_reason
+    }];
   const signedUserIds = signatures.map((signature) => signature.signer_id);
   const isRecipient = selected.destination_role === session.user.role;
   const hasCurrentUserSigned = signedUserIds.includes(session.user.id);
@@ -956,6 +1188,22 @@ function OrderDetails({
   const canEdit = allowEdit && ["admin", "requester"].includes(session.user.role) && ["draft", "correction_requested"].includes(selected.status);
   const canSubmit = canEdit;
   const canReview = selected.status === "pending_signature" && !hasCurrentUserSigned && isRecipient;
+
+  const divergenceInfo = selected.divergence ?? (
+    session.user.role === "admin" && selected.status === "divergent"
+      ? (() => {
+        const divEvent = [...(selected.events ?? [])]
+          .reverse()
+          .find((e) => e.event_type?.toLowerCase().includes("diverg") || e.event_type?.toLowerCase().includes("corre"));
+        return divEvent ? {
+          reason: divEvent.message,
+          createdAt: divEvent.created_at,
+          validatorName: divEvent.actor_name,
+          validatorEmail: divEvent.actor_email
+        } : null;
+      })()
+      : null
+  );
 
   return (
     <section className="panel detail-panel">
@@ -972,14 +1220,51 @@ function OrderDetails({
         )}
       </div>
 
+      <div className="order-identification-block">
+        <div className="id-card">
+          <span className="id-label">Número da OS</span>
+          <span className="id-value">{selected.authorized_person_document || selected.code || "—"}</span>
+        </div>
+        <div className="id-card">
+          <span className="id-label">Solicitante</span>
+          <span className="id-value">{selected.authorized_person_name || selected.requester_name || "—"}</span>
+        </div>
+      </div>
+
+      {divergenceInfo && (
+        <section className="divergence-callout">
+          <div className="divergence-callout-header">
+            <div>
+              <AlertTriangle size={20} color="#9f2d3a" />
+              <strong>Ordem de Serviço #{selected.code}</strong>
+            </div>
+            <span className="divergence-tag">Status: Divergente</span>
+          </div>
+          <div className="divergence-body">
+            <div>
+              <label>Motivo da divergência:</label>
+              <p className="divergence-reason">{divergenceInfo.reason || "Nenhum motivo detalhado informado."}</p>
+            </div>
+            <dl className="divergence-meta">
+              <div>
+                <dt>Data:</dt>
+                <dd>{formatDateTime(divergenceInfo.createdAt)}</dd>
+              </div>
+              <div>
+                <dt>Validador:</dt>
+                <dd>{divergenceInfo.validatorName || "Validador"}{divergenceInfo.validatorEmail ? ` (${divergenceInfo.validatorEmail})` : ""}</dd>
+              </div>
+            </dl>
+          </div>
+        </section>
+      )}
+
       <dl className="info-grid">
         <div><dt>Tipo da ordem</dt><dd>{typeLabel(selected.order_type)}</dd></div>
         <div><dt>Modelos</dt><dd>{items.map((item) => item.terminal_model).join(", ")}</dd></div>
         <div><dt>Part Numbers</dt><dd>{items.map((item) => item.part_number).join(", ")}</dd></div>
         <div><dt>Clientes</dt><dd>{items.map((item) => item.client_name).join(", ")}</dd></div>
         <div><dt>Quantia total</dt><dd>{items.reduce((sum, item) => sum + Number(item.quantity ?? 0), 0)}</dd></div>
-        <div><dt>Solicitante</dt><dd>{selected.authorized_person_name}</dd></div>
-        <div><dt>Nº OS</dt><dd>{selected.authorized_person_document}</dd></div>
         <div><dt>Criada por</dt><dd>{selected.requester_name}</dd></div>
         <div><dt>Data Solicitacao</dt><dd>{formatDate(selected.valid_from)}</dd></div>
         <div><dt>Destinatario</dt><dd>{destinationLabel(selected.destination_role)}</dd></div>
@@ -1025,25 +1310,106 @@ function OrderDetails({
       )}
 
       {canReview && (
-        <div className="feedback-box">
-          <label>
-            Nome de quem assinou
-            <input value={signatureName} onChange={(event) => setSignatureName(event.target.value)} />
-          </label>
-          <button className="success" onClick={onSign} disabled={signatureName.trim().length < 2}>
-            <CheckCircle2 size={18} />
-            Assinar
-          </button>
-          <textarea
-            placeholder="Descreva o que precisa ser corrigido"
-            value={feedback}
-            onChange={(event) => setFeedback(event.target.value)}
-          />
-          <button className="danger" onClick={onCorrection}>
-            <RefreshCw size={18} />
-            Pedir correcao
-          </button>
-        </div>
+        <section className="validation-decision-panel">
+          <div className="signer-pill">
+            <span>Assinante:</span>
+            <strong>{session.user.name}</strong>
+          </div>
+
+          <div className="decision-prompt">
+            <h4>A ordem está correta?</h4>
+            <div className="decision-options">
+              <label className={`decision-label ${validationDecision === "yes" ? "selected" : ""}`}>
+                <input
+                  type="radio"
+                  name={`decision-${selected.id}`}
+                  value="yes"
+                  checked={validationDecision === "yes"}
+                  onChange={() => setValidationDecision("yes")}
+                />
+                <CheckCircle2 size={18} />
+                <span>SIM</span>
+              </label>
+              <label className={`decision-label ${validationDecision === "no" ? "selected" : ""}`}>
+                <input
+                  type="radio"
+                  name={`decision-${selected.id}`}
+                  value="no"
+                  checked={validationDecision === "no"}
+                  onChange={() => setValidationDecision("no")}
+                />
+                <XCircle size={18} />
+                <span>NÃO</span>
+              </label>
+            </div>
+          </div>
+
+          {validationDecision === "yes" && (
+            <div className="decision-step-yes">
+              <label>
+                Quantidade de chaves
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9]*"
+                  className="numeric-input"
+                  placeholder="Quantia de chaves"
+                  value={keyCount}
+                  onKeyDown={(e) => {
+                    if (["e", "E", "+", "-", ".", ","].includes(e.key)) {
+                      e.preventDefault();
+                    }
+                  }}
+                  onChange={(event) => {
+                    const cleaned = event.target.value.replace(/\D/g, "").replace(/^0+/, "");
+                    setKeyCount(cleaned);
+                  }}
+                  required
+                />
+              </label>
+              <button
+                className="success"
+                type="button"
+                disabled={!keyCount || Number(keyCount) <= 0}
+                onClick={() => {
+                  onSign(keyCount);
+                  setValidationDecision(null);
+                  setKeyCount("");
+                }}
+              >
+                <CheckCircle2 size={18} />
+                Confirmar validação
+              </button>
+            </div>
+          )}
+
+          {validationDecision === "no" && (
+            <div className="decision-step-no">
+              <label>
+                Informe o que precisa ser corrigido
+                <textarea
+                  placeholder="Descreva detalhadamente o que precisa ser corrigido na OS..."
+                  value={correctionMsg}
+                  onChange={(event) => setCorrectionMsg(event.target.value)}
+                  required
+                />
+              </label>
+              <button
+                className="danger"
+                type="button"
+                disabled={!correctionMsg.trim()}
+                onClick={() => {
+                  onCorrection(correctionMsg);
+                  setValidationDecision(null);
+                  setCorrectionMsg("");
+                }}
+              >
+                <RefreshCw size={18} />
+                Enviar para correção
+              </button>
+            </div>
+          )}
+        </section>
       )}
 
       <section className="signature-list">
@@ -1054,8 +1420,8 @@ function OrderDetails({
             <ShieldCheck size={20} />
             <div>
               <strong>{signature.display_signer_name ?? signature.user_name}</strong>
+              {signature.key_count != null && <span> | {signature.key_count} chave(s)</span>}
               <span>{formatDateTime(signature.signed_at)}</span>
-              <small>{signature.signature_hash}</small>
             </div>
           </article>
         ))}
@@ -1224,6 +1590,10 @@ function orderValidationHint(order) {
     return "Aguardando correcao";
   }
 
+  if (order.status === "divergent") {
+    return "Divergência apontada";
+  }
+
   if (order.status === "draft") {
     return "Ainda nao enviada";
   }
@@ -1248,6 +1618,10 @@ function userOrderMatchesFilter(order, filter) {
 
   if (filter === "recertificar") {
     return order.status === "correction_requested";
+  }
+
+  if (filter === "divergent") {
+    return order.status === "divergent";
   }
 
   return true;

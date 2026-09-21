@@ -14,6 +14,8 @@ EXCEPTION
   WHEN duplicate_object THEN null;
 END $$;
 
+ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'divergent';
+
 CREATE TABLE IF NOT EXISTS users (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   name TEXT NOT NULL,
@@ -133,3 +135,47 @@ CREATE INDEX IF NOT EXISTS idx_service_orders_second_signer ON service_orders(se
 CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(service_order_id);
 CREATE INDEX IF NOT EXISTS idx_order_events_order ON order_events(service_order_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_order_signatures_order_signer ON order_signatures(service_order_id, signer_id);
+
+-- Sequência anual para numeração concorrente de OS
+CREATE TABLE IF NOT EXISTS os_sequences (
+  year INTEGER PRIMARY KEY,
+  last_value INTEGER NOT NULL DEFAULT 0
+);
+
+ALTER TABLE service_orders ADD COLUMN IF NOT EXISTS order_year INTEGER;
+ALTER TABLE service_orders ADD COLUMN IF NOT EXISTS order_sequence INTEGER;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_service_orders_year_seq ON service_orders(order_year, order_sequence);
+
+ALTER TABLE order_signatures ADD COLUMN IF NOT EXISTS key_count INTEGER;
+
+-- Part numbers por modelo de terminal
+CREATE TABLE IF NOT EXISTS part_numbers (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  terminal_model_id UUID NOT NULL REFERENCES terminal_models(id) ON DELETE CASCADE,
+  part_number TEXT NOT NULL,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT uq_model_part_number UNIQUE (terminal_model_id, part_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_part_numbers_model ON part_numbers(terminal_model_id);
+
+-- Sementes iniciais para os modelos existentes
+INSERT INTO part_numbers (terminal_model_id, part_number)
+SELECT tm.id, pn.part_number
+FROM terminal_models tm
+CROSS JOIN (
+  VALUES
+    ('D195', 'PN-D195-01'),
+    ('D195', 'PN-D195-02'),
+    ('S920', 'PN-S920-01'),
+    ('S920', 'PN-S920-02'),
+    ('Q92x', 'PN-Q92X-01'),
+    ('Q92x', 'PN-Q92X-02'),
+    ('A910', 'PN-A910-01'),
+    ('A910', 'PN-A910-02'),
+    ('P2',   'PN-P2-01'),
+    ('P2',   'PN-P2-02')
+) AS pn(model_name, part_number)
+WHERE tm.name = pn.model_name
+ON CONFLICT (terminal_model_id, part_number) DO NOTHING;

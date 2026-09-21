@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-export function buildSignature({ order, signer, signerName, ipAddress, userAgent }) {
+export function buildSignature({ order, signer, signerName, keyCount, ipAddress, userAgent }) {
   const signedAt = new Date().toISOString();
   const payload = {
     orderId: order.id,
@@ -17,6 +17,7 @@ export function buildSignature({ order, signer, signerName, ipAddress, userAgent
     signerId: signer.id,
     signerEmail: signer.email,
     signerName,
+    keyCount: keyCount ?? null,
     signedAt,
     ipAddress,
     userAgent

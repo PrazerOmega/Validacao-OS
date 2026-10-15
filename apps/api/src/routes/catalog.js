@@ -70,19 +70,21 @@ catalogRouter.post("/terminal-models", requireRole("admin"), async (req, res) =>
 const partNumberSchema = z.object({
   terminalModelId: z.string().uuid().optional(),
   terminalModelName: z.string().trim().min(1).optional(),
+  modelName: z.string().trim().min(1).optional(),
   partNumber: z.string().trim().min(1).max(80)
 });
 
 catalogRouter.post("/part-numbers", requireRole("admin"), async (req, res) => {
   const parsed = partNumberSchema.safeParse(req.body);
+  const targetModelName = parsed.success ? (parsed.data.terminalModelName || parsed.data.modelName) : null;
 
-  if (!parsed.success || (!parsed.data.terminalModelId && !parsed.data.terminalModelName)) {
+  if (!parsed.success || (!parsed.data.terminalModelId && !targetModelName)) {
     return res.status(400).json({ message: "Informe o modelo e um Part Number valido." });
   }
 
   let modelId = parsed.data.terminalModelId;
-  if (!modelId && parsed.data.terminalModelName) {
-    const modelRes = await query("SELECT id FROM terminal_models WHERE name = $1 AND active = TRUE", [parsed.data.terminalModelName]);
+  if (!modelId && targetModelName) {
+    const modelRes = await query("SELECT id FROM terminal_models WHERE name = $1 AND active = TRUE", [targetModelName]);
     if (!modelRes.rows[0]) {
       return res.status(400).json({ message: "Modelo de terminal nao encontrado." });
     }

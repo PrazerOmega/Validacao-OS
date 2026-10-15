@@ -3,6 +3,7 @@ import express from "express";
 import "dotenv/config";
 import { authRouter } from "./routes/auth.js";
 import { catalogRouter } from "./routes/catalog.js";
+import { dashboardRouter } from "./routes/dashboard.js";
 import { ordersRouter } from "./routes/orders.js";
 import { usersRouter } from "./routes/users.js";
 import { requireAuth } from "./middleware/auth.js";
@@ -21,6 +22,7 @@ app.use("/auth", authRouter);
 app.use("/catalog", requireAuth, catalogRouter);
 app.use("/users", requireAuth, usersRouter);
 app.use("/orders", requireAuth, ordersRouter);
+app.use("/dashboard", requireAuth, dashboardRouter);
 
 app.use((error, _req, res, _next) => {
   console.error(error);

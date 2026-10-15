@@ -1,7 +1,15 @@
 import crypto from "node:crypto";
 
-export function buildSignature({ order, signer, signerName, keyCount, ipAddress, userAgent }) {
+export function buildSignature({ order, signer, signerName, keyCount, ipAddress, userAgent, items = [] }) {
   const signedAt = new Date().toISOString();
+  const serializedItems = items.map((item) => ({
+    model: item.terminal_model || item.itemIdentifier || item.item_identifier || "",
+    partNumber: item.part_number || item.partNumber || "",
+    clientName: item.client_name || item.clientName || "",
+    quantity: Number(item.quantity || 1),
+    configuration: item.configuration || ""
+  }));
+
   const payload = {
     orderId: order.id,
     code: order.code,
@@ -18,6 +26,7 @@ export function buildSignature({ order, signer, signerName, keyCount, ipAddress,
     signerEmail: signer.email,
     signerName,
     keyCount: keyCount ?? null,
+    items: serializedItems,
     signedAt,
     ipAddress,
     userAgent

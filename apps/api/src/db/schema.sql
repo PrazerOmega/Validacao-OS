@@ -51,12 +51,13 @@ ON CONFLICT (name) DO NOTHING;
 CREATE TABLE IF NOT EXISTS service_orders (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   code TEXT NOT NULL UNIQUE,
-  item_name TEXT NOT NULL,
+  item_name TEXT,
   item_identifier TEXT NOT NULL,
   authorized_person_name TEXT NOT NULL,
   authorized_person_document TEXT NOT NULL,
   usage_reason TEXT NOT NULL,
   order_type TEXT NOT NULL DEFAULT 'Reparo',
+  executor_team TEXT,
   valid_from DATE NOT NULL,
   valid_until DATE NOT NULL,
   signature_due_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '1 day'),
@@ -65,6 +66,7 @@ CREATE TABLE IF NOT EXISTS service_orders (
   destination_role user_role NOT NULL DEFAULT 'signer',
   signer_id UUID REFERENCES users(id),
   second_signer_id UUID REFERENCES users(id),
+  incorrect_signatures INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -72,7 +74,7 @@ CREATE TABLE IF NOT EXISTS service_orders (
 CREATE TABLE IF NOT EXISTS order_items (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   service_order_id UUID NOT NULL REFERENCES service_orders(id) ON DELETE CASCADE,
-  item_name TEXT NOT NULL,
+  item_name TEXT,
   terminal_model TEXT NOT NULL,
   part_number TEXT NOT NULL,
   client_name TEXT NOT NULL,
@@ -82,9 +84,20 @@ CREATE TABLE IF NOT EXISTS order_items (
 );
 
 ALTER TABLE service_orders ADD COLUMN IF NOT EXISTS order_type TEXT NOT NULL DEFAULT 'Reparo';
+ALTER TABLE service_orders ADD COLUMN IF NOT EXISTS executor_team TEXT;
+DO $$ BEGIN
+  ALTER TABLE service_orders ADD CONSTRAINT service_orders_executor_team_check
+  CHECK (executor_team IS NULL OR executor_team IN ('suporte', 'producao'));
+EXCEPTION
+  WHEN duplicate_object THEN null;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_service_orders_executor_team ON service_orders(executor_team);
 ALTER TABLE service_orders ADD COLUMN IF NOT EXISTS destination_role user_role;
 ALTER TABLE service_orders ADD COLUMN IF NOT EXISTS signature_due_at TIMESTAMPTZ;
 ALTER TABLE service_orders ADD COLUMN IF NOT EXISTS second_signer_id UUID REFERENCES users(id);
+ALTER TABLE service_orders ADD COLUMN IF NOT EXISTS incorrect_signatures INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE service_orders ALTER COLUMN item_name DROP NOT NULL;
+ALTER TABLE order_items ALTER COLUMN item_name DROP NOT NULL;
 UPDATE service_orders SET destination_role = 'signer' WHERE destination_role IS NULL;
 ALTER TABLE service_orders ALTER COLUMN destination_role SET DEFAULT 'signer';
 ALTER TABLE service_orders ALTER COLUMN destination_role SET NOT NULL;
@@ -179,3 +192,24 @@ CROSS JOIN (
 ) AS pn(model_name, part_number)
 WHERE tm.name = pn.model_name
 ON CONFLICT (terminal_model_id, part_number) DO NOTHING;
+
+-- Tabela de registro persistente de ocorrências (ex: 2 tentativas incorretas de assinatura)
+CREATE TABLE IF NOT EXISTS signature_occurrences (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  service_order_id UUID NOT NULL REFERENCES service_orders(id) ON DELETE CASCADE,
+  order_code TEXT NOT NULL,
+  user_id UUID REFERENCES users(id),
+  user_name TEXT NOT NULL,
+  error_type TEXT NOT NULL DEFAULT 'two_incorrect_attempts',
+  attempt_count INTEGER NOT NULL DEFAULT 2,
+  description TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  email_sent_at TIMESTAMPTZ,
+  email_recipient TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_signature_occurrences_order ON signature_occurrences(service_order_id);
+CREATE INDEX IF NOT EXISTS idx_signature_occurrences_status ON signature_occurrences(status);
+

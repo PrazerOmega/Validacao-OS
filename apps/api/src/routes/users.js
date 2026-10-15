@@ -41,15 +41,22 @@ usersRouter.post("/", requireRole("admin"), async (req, res) => {
     return res.status(400).json({ message: "Dados de usuario invalidos." });
   }
 
-  const passwordHash = await bcrypt.hash(parsed.data.password, 10);
-  const { rows } = await query(
-    `INSERT INTO users (name, email, password_hash, role)
-     VALUES ($1, $2, $3, $4)
-     RETURNING id, name, email, role, active, created_at`,
-    [parsed.data.name, parsed.data.email, passwordHash, parsed.data.role]
-  );
+  try {
+    const passwordHash = await bcrypt.hash(parsed.data.password, 10);
+    const { rows } = await query(
+      `INSERT INTO users (name, email, password_hash, role)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, name, email, role, active, created_at`,
+      [parsed.data.name, parsed.data.email, passwordHash, parsed.data.role]
+    );
 
-  return res.status(201).json(rows[0]);
+    return res.status(201).json(rows[0]);
+  } catch (error) {
+    if (error.code === "23505") {
+      return res.status(409).json({ message: "Este e-mail já está em uso por outro usuário." });
+    }
+    throw error;
+  }
 });
 
 usersRouter.patch("/:id", requireRole("admin"), async (req, res) => {
@@ -63,28 +70,35 @@ usersRouter.patch("/:id", requireRole("admin"), async (req, res) => {
     return res.status(409).json({ message: "Nao altere seu proprio tipo nem remova seu proprio usuario." });
   }
 
-  const { rows } = await query(
-    `UPDATE users
-     SET name = COALESCE($1, name),
-         email = COALESCE($2, email),
-         role = COALESCE($3::user_role, role),
-         active = COALESCE($4::boolean, active)
-     WHERE id = $5
-     RETURNING id, name, email, role, active, created_at`,
-    [
-      parsed.data.name ?? null,
-      parsed.data.email ?? null,
-      parsed.data.role ?? null,
-      typeof parsed.data.active === "boolean" ? parsed.data.active : null,
-      req.params.id
-    ]
-  );
+  try {
+    const { rows } = await query(
+      `UPDATE users
+       SET name = COALESCE($1, name),
+           email = COALESCE($2, email),
+           role = COALESCE($3::user_role, role),
+           active = COALESCE($4::boolean, active)
+       WHERE id = $5
+       RETURNING id, name, email, role, active, created_at`,
+      [
+        parsed.data.name ?? null,
+        parsed.data.email ?? null,
+        parsed.data.role ?? null,
+        typeof parsed.data.active === "boolean" ? parsed.data.active : null,
+        req.params.id
+      ]
+    );
 
-  if (!rows[0]) {
-    return res.status(404).json({ message: "Usuario nao encontrado." });
+    if (!rows[0]) {
+      return res.status(404).json({ message: "Usuario nao encontrado." });
+    }
+
+    return res.json(rows[0]);
+  } catch (error) {
+    if (error.code === "23505") {
+      return res.status(409).json({ message: "Este e-mail já está em uso por outro usuário." });
+    }
+    throw error;
   }
-
-  return res.json(rows[0]);
 });
 
 usersRouter.delete("/:id", requireRole("admin"), async (req, res) => {

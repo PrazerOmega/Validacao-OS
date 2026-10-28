@@ -33,10 +33,23 @@ const signatureSchema = z.object({
   signerName: z.string().min(2)
 });
 
+const stockStatusSchema = z.object({
+  status: z.enum(["pending", "unavailable", "separating", "separated"]),
+  note: z.string().trim().max(500).optional().nullable()
+});
+
+const stockStatusLabels = {
+  pending: "Pendente",
+  unavailable: "Sem estoque",
+  separating: "Em separacao",
+  separated: "Separado"
+};
+
 function canSeeOrder(user, order) {
   return (
     user.role === "admin" ||
     user.role === "spectator" ||
+    (user.role === "stock" && order.status !== "draft") ||
     order.requester_id === user.id ||
     order.destination_role === user.role
   );
@@ -119,11 +132,16 @@ ordersRouter.get("/", async (req, res) => {
     filters.push("TRUE");
   }
 
+  if (req.user.role === "stock") {
+    filters.push("so.status <> 'draft'");
+  }
+
   const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
   const { rows } = await query(
     `SELECT so.*, requester.name AS requester_name,
             (SELECT COALESCE(SUM(quantity), 0)::int FROM order_items WHERE service_order_id = so.id) AS total_quantity,
             (SELECT COUNT(*)::int FROM order_items WHERE service_order_id = so.id) AS item_count,
+            (SELECT COUNT(*)::int FROM order_items WHERE service_order_id = so.id AND stock_status = 'separated') AS separated_count,
             (SELECT STRING_AGG(DISTINCT terminal_model, ', ') FROM order_items WHERE service_order_id = so.id) AS terminal_models,
             (SELECT STRING_AGG(DISTINCT part_number, ', ') FROM order_items WHERE service_order_id = so.id) AS part_numbers,
             (SELECT STRING_AGG(DISTINCT client_name, ', ') FROM order_items WHERE service_order_id = so.id) AS client_names,
@@ -219,10 +237,13 @@ ordersRouter.get("/:id", async (req, res) => {
       [order.id]
     ),
     query(
-      `SELECT id, item_name, terminal_model, part_number, client_name, quantity, configuration, created_at
-       FROM order_items
-       WHERE service_order_id = $1
-       ORDER BY created_at ASC, id ASC`,
+      `SELECT oi.id, oi.item_name, oi.terminal_model, oi.part_number, oi.client_name, oi.quantity,
+              oi.configuration, oi.created_at, oi.stock_status, oi.stock_note, oi.stock_updated_at,
+              stock_user.name AS stock_updated_by_name
+       FROM order_items oi
+       LEFT JOIN users stock_user ON stock_user.id = oi.stock_updated_by
+       WHERE oi.service_order_id = $1
+       ORDER BY oi.created_at ASC, oi.id ASC`,
       [order.id]
     )
   ]);
@@ -308,6 +329,85 @@ ordersRouter.post("/:id/submit", requireRole("requester", "admin"), async (req, 
   }
 
   const { rows } = await query(
+    "UPDATE service_orders SET status = 'awaiting_stock', updated_at = NOW() WHERE id = $1 RETURNING *",
+    [order.id]
+  );
+
+  await addOrderEvent({
+    orderId: order.id,
+    actorId: req.user.id,
+    eventType: "Enviada ao estoque",
+    message: "Ordem enviada ao estoque para separacao dos terminais."
+  });
+
+  return res.json(rows[0]);
+});
+
+ordersRouter.patch("/:id/items/:itemId/stock", requireRole("stock"), async (req, res) => {
+  const order = await findOrder(req.params.id);
+
+  if (!order) {
+    return res.status(404).json({ message: "Ordem nao encontrada." });
+  }
+
+  if (order.status !== "awaiting_stock") {
+    return res.status(409).json({ message: "Apenas ordens aguardando estoque podem ter a separacao alterada." });
+  }
+
+  const parsed = stockStatusSchema.safeParse(req.body);
+
+  if (!parsed.success) {
+    return res.status(400).json({ message: "Status de separacao invalido." });
+  }
+
+  const note = parsed.data.note || null;
+  const { rows } = await query(
+    `UPDATE order_items
+     SET stock_status = $1, stock_note = $2, stock_updated_at = NOW(), stock_updated_by = $3
+     WHERE id = $4 AND service_order_id = $5
+     RETURNING *`,
+    [parsed.data.status, note, req.user.id, req.params.itemId, order.id]
+  );
+
+  if (!rows[0]) {
+    return res.status(404).json({ message: "Item nao encontrado nesta ordem." });
+  }
+
+  await query("UPDATE service_orders SET updated_at = NOW() WHERE id = $1", [order.id]);
+
+  const item = rows[0];
+  await addOrderEvent({
+    orderId: order.id,
+    actorId: req.user.id,
+    eventType: "Estoque",
+    message: `${item.terminal_model} (PN ${item.part_number}, qtd ${item.quantity}): ${stockStatusLabels[item.stock_status]}${note ? ` - ${note}` : ""}`,
+    metadata: { itemId: item.id, stockStatus: item.stock_status }
+  });
+
+  return res.json(item);
+});
+
+ordersRouter.post("/:id/send-to-signature", requireRole("stock"), async (req, res) => {
+  const order = await findOrder(req.params.id);
+
+  if (!order) {
+    return res.status(404).json({ message: "Ordem nao encontrada." });
+  }
+
+  if (order.status !== "awaiting_stock") {
+    return res.status(409).json({ message: "Apenas ordens aguardando estoque podem ser enviadas para assinatura." });
+  }
+
+  const pending = await query(
+    "SELECT COUNT(*)::int AS count FROM order_items WHERE service_order_id = $1 AND stock_status <> 'separated'",
+    [order.id]
+  );
+
+  if (pending.rows[0].count > 0) {
+    return res.status(409).json({ message: "Todos os itens precisam estar separados antes de enviar para assinatura." });
+  }
+
+  const { rows } = await query(
     "UPDATE service_orders SET status = 'pending_signature', updated_at = NOW() WHERE id = $1 RETURNING *",
     [order.id]
   );
@@ -316,24 +416,26 @@ ordersRouter.post("/:id/submit", requireRole("requester", "admin"), async (req, 
     orderId: order.id,
     actorId: req.user.id,
     eventType: "Enviada",
-    message: "Ordem enviada para todos os usuarios assinadores."
+    message: "Terminais separados. Ordem enviada para assinatura do suporte."
   });
 
   return res.json(rows[0]);
 });
 
-ordersRouter.post("/:id/request-correction", requireRole("signer"), async (req, res) => {
+ordersRouter.post("/:id/request-correction", requireRole("signer", "stock"), async (req, res) => {
   const order = await findOrder(req.params.id);
 
   if (!order) {
     return res.status(404).json({ message: "Ordem nao encontrada." });
   }
 
-  if (order.destination_role !== req.user.role) {
+  const isStock = req.user.role === "stock";
+
+  if (!isStock && order.destination_role !== req.user.role) {
     return res.status(403).json({ message: "Permissao insuficiente." });
   }
 
-  if (order.status !== "pending_signature") {
+  if (order.status !== (isStock ? "awaiting_stock" : "pending_signature")) {
     return res.status(409).json({ message: "Apenas ordens pendentes podem receber devolutiva." });
   }
 

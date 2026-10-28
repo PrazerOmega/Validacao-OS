@@ -8,6 +8,7 @@ import {
   FileSignature,
   History,
   LogOut,
+  Package,
   Plus,
   RefreshCw,
   Save,
@@ -25,6 +26,7 @@ const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3333";
 
 const statusLabels = {
   draft: "Rascunho",
+  awaiting_stock: "Aguardando estoque",
   pending_signature: "Aguardando assinaturas",
   correction_requested: "Correcao solicitada",
   signed: "Aprovada",
@@ -33,6 +35,7 @@ const statusLabels = {
 
 const statusIcons = {
   draft: Edit3,
+  awaiting_stock: Package,
   pending_signature: Clock3,
   correction_requested: RefreshCw,
   signed: CheckCircle2,
@@ -52,9 +55,17 @@ const defaultCatalog = {
 
 const roleOptions = [
   { value: "requester", label: "Operações" },
+  { value: "stock", label: "Estoque" },
   { value: "signer", label: "Suporte" },
   { value: "spectator", label: "Produção" },
   { value: "admin", label: "Admin" }
+];
+
+const stockStatusOptions = [
+  { value: "pending", label: "Pendente" },
+  { value: "unavailable", label: "Sem estoque" },
+  { value: "separating", label: "Em separacao" },
+  { value: "separated", label: "Separado" }
 ];
 
 const destinationOptions = [
@@ -291,6 +302,25 @@ function App() {
     }
   }
 
+  async function updateItemStock(itemId, changes) {
+    setMessage("");
+    try {
+      await api.request(`/orders/${selected.id}/items/${itemId}/stock`, {
+        method: "PATCH",
+        body: JSON.stringify(changes)
+      });
+    } catch (err) {
+      setMessage(err.message);
+    }
+    await loadData();
+    setSelected(await api.request(`/orders/${selected.id}`));
+  }
+
+  const stockActions = {
+    onUpdateItemStock: updateItemStock,
+    onSendToSignature: () => runOrderAction(`/orders/${selected.id}/send-to-signature`).catch((err) => setMessage(err.message))
+  };
+
   async function createUser(event) {
     event.preventDefault();
     await api.request("/users", {
@@ -437,6 +467,7 @@ function App() {
             setSignatureName={setSignatureName}
             onSelectOrder={selectOrder}
             onNewOrder={() => setUserMenu("create")}
+            stockActions={stockActions}
             onSubmit={() => runOrderAction(`/orders/${selected.id}/submit`)}
             onSign={() => runOrderAction(`/orders/${selected.id}/sign`, { signerName: session.user.email })}
             onCorrection={() => {
@@ -636,19 +667,29 @@ function UserOrdersPanel({
   setSignatureName,
   onSelectOrder,
   onNewOrder,
+  stockActions,
   onSubmit,
   onSign,
   onCorrection,
   onEdit
 }) {
-  const [filter, setFilter] = useState("sem_assinatura");
+  const isStock = session.user.role === "stock";
+  const [filter, setFilter] = useState(isStock ? "estoque" : "sem_assinatura");
   const filteredOrders = orders.filter((order) => userOrderMatchesFilter(order, filter));
-  const filterOptions = [
-    { value: "sem_assinatura", label: "SEM ASSINATURA" },
-    { value: "aguardando_1", label: "AGUARDANDO 1 ASSINATURA" },
-    { value: "signed", label: "ASSINADAS" },
-    { value: "recertificar", label: "RESERTIFICAR" }
-  ];
+  const filterOptions = isStock
+    ? [
+        { value: "estoque", label: "A SEPARAR" },
+        { value: "enviadas", label: "ENVIADAS P/ ASSINATURA" },
+        { value: "signed", label: "ASSINADAS" },
+        { value: "recertificar", label: "DEVOLVIDAS" }
+      ]
+    : [
+        { value: "estoque", label: "NO ESTOQUE" },
+        { value: "sem_assinatura", label: "SEM ASSINATURA" },
+        { value: "aguardando_1", label: "AGUARDANDO 1 ASSINATURA" },
+        { value: "signed", label: "ASSINADAS" },
+        { value: "recertificar", label: "RESERTIFICAR" }
+      ];
 
   return (
     <div className="content-grid user-orders-layout">
@@ -695,6 +736,7 @@ function UserOrdersPanel({
         setFeedback={setFeedback}
         signatureName={signatureName}
         setSignatureName={setSignatureName}
+        {...stockActions}
         onSubmit={onSubmit}
         onSign={onSign}
         onCorrection={onCorrection}
@@ -781,7 +823,7 @@ function AdminOrdersPanel({ orders, selected, onSelectOrder }) {
       acc[order.status] = (acc[order.status] ?? 0) + 1;
       return acc;
     },
-    { total: 0, draft: 0, pending_signature: 0, correction_requested: 0, signed: 0, cancelled: 0 }
+    { total: 0, draft: 0, awaiting_stock: 0, pending_signature: 0, correction_requested: 0, signed: 0, cancelled: 0 }
   );
   const statusFilteredOrders = statusFilter === "total"
     ? orders
@@ -800,6 +842,9 @@ function AdminOrdersPanel({ orders, selected, onSelectOrder }) {
       <div className="status-summary">
         <button className={statusFilter === "total" ? "active" : ""} onClick={() => setStatusFilter("total")}>
           <strong>{counts.total}</strong><span>Total</span>
+        </button>
+        <button className={statusFilter === "awaiting_stock" ? "active" : ""} onClick={() => setStatusFilter("awaiting_stock")}>
+          <strong>{counts.awaiting_stock}</strong><span>Estoque</span>
         </button>
         <button className={statusFilter === "pending_signature" ? "active" : ""} onClick={() => setStatusFilter("pending_signature")}>
           <strong>{counts.pending_signature}</strong><span>Aguardando</span>
@@ -931,6 +976,8 @@ function OrderDetails({
   onSign,
   onCorrection,
   onEdit,
+  onUpdateItemStock,
+  onSendToSignature,
   allowEdit = true
 }) {
   if (!selected) {
@@ -962,6 +1009,9 @@ function OrderDetails({
   const canEdit = allowEdit && ["admin", "requester"].includes(session.user.role) && ["draft", "correction_requested"].includes(selected.status);
   const canSubmit = canEdit;
   const canReview = selected.status === "pending_signature" && !hasCurrentUserSigned && isRecipient;
+  const canSeparate = session.user.role === "stock" && selected.status === "awaiting_stock" && Boolean(onUpdateItemStock);
+  const allSeparated = items.every((item) => item.stock_status === "separated");
+  const separatedCount = items.filter((item) => item.stock_status === "separated").length;
   const signerEmail = session.user.email ?? signatureName;
 
   return (
@@ -990,6 +1040,7 @@ function OrderDetails({
         <div><dt>Criada por</dt><dd>{selected.requester_name}</dd></div>
         <div><dt>Data Solicitacao</dt><dd>{formatDate(selected.valid_from)}</dd></div>
         <div><dt>Destinatario</dt><dd>{destinationLabel(selected.destination_role)}</dd></div>
+        <div><dt>Separacao</dt><dd>{separatedCount}/{items.length} itens separados</dd></div>
         <div><dt>Prazo Assinatura</dt><dd>{formatDateTime(selected.signature_due_at)}</dd></div>
         <div><dt>Aprovacao</dt><dd>{signatures.length >= 2 ? "Completa" : `${signatures.length}/2 assinaturas`}</dd></div>
       </dl>
@@ -1004,6 +1055,7 @@ function OrderDetails({
             <span>Nota</span>
             <span>Quantia</span>
             {!isSpectator && <span>Configuracao</span>}
+            <span>Estoque</span>
           </div>
           {items.map((item) => (
             <div className={`items-table-row ${isSpectator ? "spectator" : ""}`} key={item.id}>
@@ -1013,16 +1065,47 @@ function OrderDetails({
               <span>{item.item_name}</span>
               <span>{item.quantity}</span>
               {!isSpectator && <span>{item.configuration}</span>}
+              <span className="stock-cell">
+                {canSeparate ? (
+                  <StockItemControl item={item} onChange={(changes) => onUpdateItemStock(item.id, changes)} />
+                ) : (
+                  <>
+                    <em className={`stock-badge ${item.stock_status ?? "pending"}`}>{stockStatusLabel(item.stock_status)}</em>
+                    {item.stock_note && <small>{item.stock_note}</small>}
+                  </>
+                )}
+              </span>
             </div>
           ))}
         </div>
       </section>
 
+      {canSeparate && (
+        <div className="feedback-box">
+          {!allSeparated && (
+            <p className="inline-note">Marque todos os itens como "Separado" para enviar ao suporte.</p>
+          )}
+          <button className="success" onClick={onSendToSignature} disabled={!allSeparated}>
+            <Send size={18} />
+            Enviar para assinatura
+          </button>
+          <textarea
+            placeholder="Motivo para devolver a operacoes (ex: sem estoque do modelo)"
+            value={feedback}
+            onChange={(event) => setFeedback(event.target.value)}
+          />
+          <button className="danger" onClick={onCorrection} disabled={feedback.trim().length < 5}>
+            <RefreshCw size={18} />
+            Devolver para operacoes
+          </button>
+        </div>
+      )}
+
       <div className="actions">
         {canSubmit && (
           <button className="primary" onClick={onSubmit}>
             <Send size={18} />
-            Enviar
+            Enviar ao estoque
           </button>
         )}
       </div>
@@ -1084,6 +1167,33 @@ function OrderDetails({
         </div>
       </section>
     </section>
+  );
+}
+
+function StockItemControl({ item, onChange }) {
+  const [note, setNote] = useState(item.stock_note ?? "");
+  const status = item.stock_status ?? "pending";
+
+  useEffect(() => {
+    setNote(item.stock_note ?? "");
+  }, [item.stock_note]);
+
+  return (
+    <>
+      <select value={status} onChange={(event) => onChange({ status: event.target.value, note })} title="Status da separacao">
+        {stockStatusOptions.map((option) => (
+          <option key={option.value} value={option.value}>{option.label}</option>
+        ))}
+      </select>
+      <input
+        placeholder="Observacao"
+        value={note}
+        onChange={(event) => setNote(event.target.value)}
+        onBlur={() => {
+          if (note !== (item.stock_note ?? "")) onChange({ status, note });
+        }}
+      />
+    </>
   );
 }
 
@@ -1212,6 +1322,10 @@ function roleLabel(value) {
   return roleOptions.find((option) => option.value === value)?.label ?? value ?? "-";
 }
 
+function stockStatusLabel(value) {
+  return stockStatusOptions.find((option) => option.value === value)?.label ?? "Pendente";
+}
+
 function destinationLabel(value) {
   return destinationOptions.find((option) => option.value === value)?.label ?? roleLabel(value);
 }
@@ -1221,6 +1335,10 @@ function orderValidationHint(order) {
 
   if (order.status === "signed") {
     return "Aprovada com duas assinaturas";
+  }
+
+  if (order.status === "awaiting_stock") {
+    return `Estoque: ${order.separated_count ?? 0}/${order.item_count ?? 0} itens separados`;
   }
 
   if (order.status === "pending_signature") {
@@ -1240,6 +1358,14 @@ function orderValidationHint(order) {
 
 function userOrderMatchesFilter(order, filter) {
   const signatureCount = Number(order.signature_count ?? 0);
+
+  if (filter === "estoque") {
+    return order.status === "awaiting_stock";
+  }
+
+  if (filter === "enviadas") {
+    return order.status === "pending_signature";
+  }
 
   if (filter === "sem_assinatura") {
     return order.status === "pending_signature" && signatureCount === 0;

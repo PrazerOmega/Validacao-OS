@@ -11,6 +11,7 @@ const users = [
   { name: "Administrador", email: "admin@empresa.com", role: "admin" },
   { name: "Solicitante", email: "solicitante@empresa.com", role: "requester" },
   { name: "Assinante", email: "assinante@empresa.com", role: "signer" },
+  { name: "Estoque", email: "estoque@empresa.com", role: "stock" },
   { name: "Espectador", email: "espectador@empresa.com", role: "spectator" }
 ];
 

@@ -10,13 +10,13 @@ const userSchema = z.object({
   name: z.string().min(2),
   email: z.string().email(),
   password: z.string().min(6),
-  role: z.enum(["admin", "requester", "signer", "spectator"])
+  role: z.enum(["admin", "requester", "signer", "spectator", "stock"])
 });
 
 const userUpdateSchema = z.object({
   name: z.string().min(2).optional(),
   email: z.string().email().optional(),
-  role: z.enum(["admin", "requester", "signer", "spectator"]).optional(),
+  role: z.enum(["admin", "requester", "signer", "spectator", "stock"]).optional(),
   active: z.boolean().optional()
 });
 

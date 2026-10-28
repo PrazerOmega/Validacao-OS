@@ -4,8 +4,10 @@ Aplicacao para criar, revisar, assinar digitalmente e manter historico de ordens
 
 ## Perfis
 
-- `requester`: cria, edita e envia ordens para assinatura.
-- `signer`: assina ordens pendentes ou solicita correcao.
+- `requester` (Operacoes): cria, edita e envia ordens para o estoque.
+- `stock` (Estoque): marca a separacao de cada item (Pendente, Sem estoque, Em separacao, Separado), envia para assinatura ou devolve para operacoes.
+- `signer` (Suporte): assina ordens pendentes ou solicita correcao.
+- `spectator` (Producao): visualiza as ordens como guia para preparar os terminais.
 - `admin`: gerencia usuarios e acompanha todas as ordens.
 
 ## Stack
@@ -58,14 +60,16 @@ Senha padrao: `123456`
 - Admin: `admin@empresa.com`
 - Solicitante: `solicitante@empresa.com`
 - Assinante: `assinante@empresa.com`
+- Estoque: `estoque@empresa.com`
 
 ## Fluxo principal
 
-1. Solicitante cria ordem em rascunho.
-2. Solicitante envia a ordem para assinatura.
-3. Assinante pode assinar ou pedir correcao.
-4. Solicitante corrige e reenvia.
-5. Todas as mudancas geram eventos no historico.
+1. Operacoes cria ordem em rascunho.
+2. Operacoes envia a ordem ao estoque (`awaiting_stock`).
+3. Estoque marca a separacao de cada item. Com todos os itens separados, envia para assinatura; se faltar terminal, pode devolver para operacoes.
+4. Suporte assina (duas assinaturas) ou pede correcao.
+5. Operacoes corrige e reenvia (a ordem volta ao estoque).
+6. Todas as mudancas geram eventos no historico.
 
 ## Assinatura digital
 

@@ -7,12 +7,15 @@ EXCEPTION
 END $$;
 
 ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'spectator';
+ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'stock';
 
 DO $$ BEGIN
   CREATE TYPE order_status AS ENUM ('draft', 'pending_signature', 'correction_requested', 'signed', 'cancelled');
 EXCEPTION
   WHEN duplicate_object THEN null;
 END $$;
+
+ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'awaiting_stock';
 
 CREATE TABLE IF NOT EXISTS users (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -100,6 +103,19 @@ FROM service_orders so
 WHERE NOT EXISTS (
   SELECT 1 FROM order_items oi WHERE oi.service_order_id = so.id
 );
+
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS stock_status TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS stock_note TEXT;
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS stock_updated_at TIMESTAMPTZ;
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS stock_updated_by UUID REFERENCES users(id);
+ALTER TABLE order_items DROP CONSTRAINT IF EXISTS order_items_stock_status_check;
+ALTER TABLE order_items ADD CONSTRAINT order_items_stock_status_check
+  CHECK (stock_status IN ('pending', 'unavailable', 'separating', 'separated'));
+
+-- Ordens que ja passaram do estoque no fluxo antigo ficam com os itens como separados.
+UPDATE order_items SET stock_status = 'separated'
+WHERE stock_status <> 'separated'
+  AND service_order_id IN (SELECT id FROM service_orders WHERE status IN ('pending_signature', 'signed'));
 
 CREATE TABLE IF NOT EXISTS order_events (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

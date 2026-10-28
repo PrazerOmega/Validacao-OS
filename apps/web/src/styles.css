@@ -349,6 +349,10 @@ textarea {
   background: #a86515;
 }
 
+.status-dot.awaiting_stock {
+  background: #2f5f8a;
+}
+
 .status-dot.correction_requested,
 .status-dot.cancelled {
   background: #9f2d3a;
@@ -526,7 +530,7 @@ dd {
 
 .status-summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -745,14 +749,56 @@ dd {
 .items-table-head,
 .items-table-row {
   display: grid;
-  grid-template-columns: 0.8fr 1fr 1fr 1fr 80px 1.3fr;
+  grid-template-columns: 0.8fr 1fr 1fr 1fr 80px 1.3fr 1.2fr;
   gap: 8px;
   align-items: start;
 }
 
 .items-table-head.spectator,
 .items-table-row.spectator {
-  grid-template-columns: 0.9fr 1fr 1fr 1fr 80px;
+  grid-template-columns: 0.9fr 1fr 1fr 1fr 80px 1.2fr;
+}
+
+.stock-cell {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.stock-cell select,
+.stock-cell input {
+  min-height: 34px;
+  padding: 4px 8px;
+}
+
+.stock-cell small {
+  color: #66746d;
+}
+
+.stock-badge {
+  justify-self: start;
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 800;
+  background: #eceeea;
+  color: #43524b;
+}
+
+.stock-badge.separating {
+  background: #fbefd9;
+  color: #8a5110;
+}
+
+.stock-badge.separated {
+  background: #e1f0e4;
+  color: #246b36;
+}
+
+.stock-badge.unavailable {
+  background: #f6e1e4;
+  color: #9f2d3a;
 }
 
 .items-table-head {

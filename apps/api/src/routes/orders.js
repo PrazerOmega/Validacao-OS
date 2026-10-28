@@ -10,12 +10,108 @@ export const ordersRouter = express.Router();
 
 const orderItemSchema = z.object({
   itemName: z.string().optional().nullable().transform((val) => val?.trim() || ""),
-  itemIdentifier: z.string().trim().min(1),
-  partNumber: z.string().trim().min(1),
-  clientName: z.string().trim().min(1),
-  quantity: z.coerce.number().int().positive(),
-  configuration: z.string().min(1)
+  itemIdentifier: z.string().trim().min(1, "Modelo do terminal é obrigatório."),
+  partNumber: z.string().trim().min(1, "Part Number é obrigatório."),
+  clientName: z.string().trim().min(1, "Cliente é obrigatório."),
+  quantity: z.coerce.number().int().positive("A quantidade deve ser um número inteiro positivo."),
+  configuration: z.string().min(1, "Configuração é obrigatória."),
+  packaging: z.preprocess(
+    (v) => (typeof v === "string" ? v.trim().toUpperCase() : v),
+    z.enum(["CAIXA", "SACO BOLHA"], {
+      errorMap: () => ({ message: "A opção EMBALAGEM deve ser 'CAIXA' ou 'SACO BOLHA'." })
+    })
+  ),
+  battery: z.preprocess(
+    (v) => (typeof v === "string" ? v.trim().toUpperCase() : v),
+    z.enum(["SIM", "NÃO", "NAO"], {
+      errorMap: () => ({ message: "A opção BATERIA deve ser 'SIM' ou 'NÃO'." })
+    }).transform((v) => (v === "NAO" ? "NÃO" : v))
+  ),
+  terminalOpening: z.preprocess(
+    (v) => (typeof v === "string" ? v.trim().toUpperCase() : v),
+    z.enum(["SIM", "NÃO", "NAO"], {
+      errorMap: () => ({ message: "A opção ABERTURA DE TERMINAL deve ser 'SIM' ou 'NÃO'." })
+    }).transform((v) => (v === "NAO" ? "NÃO" : v))
+  ),
+  manual: z.preprocess(
+    (v) => (typeof v === "string" ? v.trim().toUpperCase() : v),
+    z.enum(["SIM", "NÃO", "NAO"], {
+      errorMap: () => ({ message: "A opção MANUAL deve ser 'SIM' ou 'NÃO'." })
+    }).transform((v) => (v === "NAO" ? "NÃO" : v))
+  ),
+  charger: z.preprocess(
+    (v) => (typeof v === "string" ? v.trim().toUpperCase() : v),
+    z.enum(["SIM", "NÃO", "NAO"], {
+      errorMap: () => ({ message: "A opção CARREGADOR deve ser 'SIM' ou 'NÃO'." })
+    }).transform((v) => (v === "NAO" ? "NÃO" : v))
+  ),
+  minbase: z.preprocess(
+    (v) => (typeof v === "string" ? v.trim().toUpperCase() : v),
+    z.enum(["SIM", "NÃO", "NAO"], {
+      errorMap: () => ({ message: "A opção MINBASE deve ser 'SIM' ou 'NÃO'." })
+    }).transform((v) => (v === "NAO" ? "NÃO" : v))
+  ),
+  label: z.preprocess(
+    (v) => (typeof v === "string" ? v.trim().toUpperCase() : v),
+    z.enum(["SIM", "NÃO", "NAO"], {
+      errorMap: () => ({ message: "A opção LABEL deve ser 'SIM' ou 'NÃO'." })
+    }).transform((v) => (v === "NAO" ? "NÃO" : v))
+  ),
+  aestheticCover: z.preprocess(
+    (v) => (typeof v === "string" ? v.trim().toUpperCase() : v),
+    z.enum(["SIM", "NÃO", "NAO"], {
+      errorMap: () => ({ message: "A opção COBRE ESTÉTICO deve ser 'SIM' ou 'NÃO'." })
+    }).transform((v) => (v === "NAO" ? "NÃO" : v))
+  )
 });
+
+function normalizeItemBody(item) {
+  if (item && typeof item === "object") {
+    if (item.terminalOpening === undefined && item.terminal_opening !== undefined) {
+      item.terminalOpening = item.terminal_opening;
+    }
+    if (item.aestheticCover === undefined && item.aesthetic_cover !== undefined) {
+      item.aestheticCover = item.aesthetic_cover;
+    }
+    if (item.itemIdentifier === undefined && item.terminal_model !== undefined) {
+      item.itemIdentifier = item.terminal_model;
+    }
+    if (item.partNumber === undefined && item.part_number !== undefined) {
+      item.partNumber = item.part_number;
+    }
+    if (item.clientName === undefined && item.client_name !== undefined) {
+      item.clientName = item.client_name;
+    }
+    if (item.itemName === undefined && item.item_name !== undefined) {
+      item.itemName = item.item_name;
+    }
+  }
+  return item;
+}
+
+function normalizeOrderBody(body) {
+  if (body && typeof body === "object") {
+    if (body.executorTeam === undefined && body.executor_team !== undefined) {
+      body.executorTeam = body.executor_team;
+    }
+    if (Array.isArray(body.items)) {
+      body.items = body.items.map(normalizeItemBody);
+    }
+  }
+  return body;
+}
+
+function formatZodError(error) {
+  const issue = error.issues?.[0];
+  if (!issue) return "Dados da ordem invalidos.";
+
+  if (issue.path?.[0] === "items" && typeof issue.path?.[1] === "number") {
+    const itemNum = issue.path[1] + 1;
+    return `Item ${itemNum}: ${issue.message}`;
+  }
+
+  return issue.message;
+}
 
 const executorTeamSchema = z.preprocess(
   (val) => {
@@ -30,15 +126,6 @@ const executorTeamSchema = z.preprocess(
     errorMap: () => ({ message: "A equipe executora deve ser 'suporte' ou 'producao'." })
   })
 );
-
-function normalizeOrderBody(body) {
-  if (body && typeof body === "object") {
-    if (body.executorTeam === undefined && body.executor_team !== undefined) {
-      body.executorTeam = body.executor_team;
-    }
-  }
-  return body;
-}
 
 const orderSchema = z.object({
   orderType: z.string().trim().min(1),
@@ -72,6 +159,49 @@ function canSeeOrder(user, order) {
   if (order.requester_id === user.id) return true;
   if (order.status === "draft") return false;
   return user.role === "spectator" || order.destination_role === user.role;
+}
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// IDs inválidos retornam 404 em vez de provocar erro 500 no PostgreSQL
+ordersRouter.param("id", (req, res, next, id) => {
+  if (!UUID_REGEX.test(id)) {
+    return res.status(404).json({ message: "Registro nao encontrado." });
+  }
+  return next();
+});
+
+/**
+ * Registra (ou atualiza) de forma atômica a ocorrência ativa de uma OS.
+ * O índice único parcial uq_signature_occurrences_active_order garante uma única
+ * ocorrência não resolvida por OS, mesmo com requisições simultâneas.
+ * A descrição nunca contém quantidades de chaves, para não comprometer o double check cego.
+ */
+async function upsertActiveOccurrence(client, { order, user, errorType, attemptCount, description }) {
+  await client.query(
+    `INSERT INTO signature_occurrences (
+       service_order_id, order_code, user_id, user_name, error_type, attempt_count, description, status
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
+     ON CONFLICT (service_order_id) WHERE status <> 'resolved'
+     DO UPDATE SET
+       attempt_count = GREATEST(signature_occurrences.attempt_count, EXCLUDED.attempt_count),
+       user_id = EXCLUDED.user_id,
+       user_name = EXCLUDED.user_name,
+       error_type = EXCLUDED.error_type,
+       description = EXCLUDED.description,
+       updated_at = NOW()`,
+    [order.id, order.code, user.id, user.name, errorType, attemptCount, description]
+  );
+}
+
+// Remove quantidades de chaves de descrições antigas (ex.: "(4 vs 1)") para perfis não administradores
+function sanitizeOccurrence(occurrence, user) {
+  if (user.role === "admin") return occurrence;
+  return {
+    ...occurrence,
+    description: String(occurrence.description || "").replace(/\s*\(\d+\s*vs\s*\d+\)/gi, "")
+  };
 }
 
 async function findOrder(id) {
@@ -119,20 +249,31 @@ async function validateCatalogOptions(values) {
 async function replaceOrderItems(orderId, items, dbClient = { query }) {
   await dbClient.query("DELETE FROM order_items WHERE service_order_id = $1", [orderId]);
 
-  for (const item of items) {
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
     await dbClient.query(
       `INSERT INTO order_items (
-         service_order_id, item_name, terminal_model, part_number, client_name, quantity, configuration
+         service_order_id, item_index, item_name, terminal_model, part_number, client_name, quantity, configuration,
+         packaging, battery, terminal_opening, manual, charger, minbase, label, aesthetic_cover
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
       [
         orderId,
+        i,
         item.itemName,
         item.itemIdentifier,
         item.partNumber,
         item.clientName,
         item.quantity,
-        item.configuration
+        item.configuration,
+        item.packaging ?? null,
+        item.battery ?? null,
+        item.terminalOpening ?? item.terminal_opening ?? null,
+        item.manual ?? null,
+        item.charger ?? null,
+        item.minbase ?? null,
+        item.label ?? null,
+        item.aestheticCover ?? item.aesthetic_cover ?? null
       ]
     );
   }
@@ -226,8 +367,7 @@ ordersRouter.post("/", requireRole("requester", "admin"), async (req, res) => {
   const parsed = orderSchema.safeParse(normalizeOrderBody(req.body));
 
   if (!parsed.success) {
-    const issue = parsed.error.issues?.[0];
-    return res.status(400).json({ message: issue?.message || "Dados da ordem invalidos." });
+    return res.status(400).json({ message: formatZodError(parsed.error) });
   }
 
   const values = parsed.data;
@@ -388,7 +528,7 @@ ordersRouter.get("/counts", async (req, res) => {
   return res.json(counts);
 });
 
-ordersRouter.get("/occurrences", requireRole("admin", "signer"), async (_req, res) => {
+ordersRouter.get("/occurrences", requireRole("admin", "signer"), async (req, res) => {
   const { rows } = await query(
     `SELECT so_occ.*, so.order_type, so.executor_team, so.status AS order_status,
             COALESCE(req_u.name, so.authorized_person_name) AS authorized_person_name,
@@ -398,7 +538,7 @@ ordersRouter.get("/occurrences", requireRole("admin", "signer"), async (_req, re
      LEFT JOIN users req_u ON req_u.id = so.requester_id
      ORDER BY so_occ.created_at DESC`
   );
-  return res.json(rows);
+  return res.json(rows.map((row) => sanitizeOccurrence(row, req.user)));
 });
 
 ordersRouter.post("/occurrences/:id/send-email", requireRole("admin", "signer"), async (req, res) => {
@@ -408,38 +548,85 @@ ordersRouter.post("/occurrences/:id/send-email", requireRole("admin", "signer"),
     return res.status(404).json({ message: "Ocorrência não encontrada." });
   }
 
+  // Evita notificações duplicadas: reenvio só com confirmação explícita
+  if (occurrence.status === "email_sent" && req.body?.resend !== true) {
+    return res.status(409).json({
+      message: `Esta ocorrência já foi notificada para ${occurrence.email_recipient} em ${new Date(occurrence.email_sent_at).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}.`
+    });
+  }
+
   const orderRes = await query("SELECT * FROM service_orders WHERE id = $1", [occurrence.service_order_id]);
   const order = orderRes.rows[0] || {};
 
-  const recipient = req.body?.recipient || null;
-  const result = await sendOccurrenceEmail({ occurrence, order, recipient });
+  const recipient = typeof req.body?.recipient === "string" ? req.body.recipient.trim() : "";
+  const result = await sendOccurrenceEmail({ occurrence: sanitizeOccurrence(occurrence, req.user), order, recipient });
 
-  if (result.configured) {
+  if (result.errorCode === "invalid_recipient" || result.errorCode === "missing_recipient") {
+    return res.status(400).json({ message: result.reason });
+  }
+
+  if (result.errorCode === "send_failed") {
+    return res.status(502).json({ message: result.reason });
+  }
+
+  // Só marca como notificada quando o servidor SMTP efetivamente aceitou a mensagem
+  if (result.success) {
     await query(
       `UPDATE signature_occurrences
-       SET status = 'email_sent', email_sent_at = NOW(), email_recipient = $1, updated_at = NOW()
+       SET status = CASE WHEN status = 'resolved' THEN status ELSE 'email_sent' END,
+           email_sent_at = NOW(), email_recipient = $1, updated_at = NOW()
        WHERE id = $2`,
       [result.recipient, occurrence.id]
     );
+
+    await addOrderEvent({
+      orderId: occurrence.service_order_id,
+      actorId: req.user.id,
+      eventType: "Ocorrência notificada",
+      message: `Ocorrência de assinatura incorreta notificada por e-mail para ${result.recipient}.`
+    });
   }
 
   return res.json(result);
 });
 
 ordersRouter.post("/occurrences/:id/resolve", requireRole("admin", "signer"), async (req, res) => {
-  const { rows } = await query(
-    `UPDATE signature_occurrences
-     SET status = 'resolved', updated_at = NOW()
-     WHERE id = $1
-     RETURNING *`,
-    [req.params.id]
-  );
+  const occRes = await query("SELECT * FROM signature_occurrences WHERE id = $1", [req.params.id]);
+  const occurrence = occRes.rows[0];
 
-  if (!rows[0]) {
+  if (!occurrence) {
     return res.status(404).json({ message: "Ocorrência não encontrada." });
   }
 
-  return res.json(rows[0]);
+  if (occurrence.status === "resolved") {
+    return res.status(409).json({ message: "Esta ocorrência já está resolvida." });
+  }
+
+  // O validador envolvido na ocorrência não pode encerrar a própria ocorrência
+  if (req.user.role !== "admin" && occurrence.user_id === req.user.id) {
+    return res.status(403).json({ message: "O usuário envolvido não pode resolver a própria ocorrência." });
+  }
+
+  const { rows } = await query(
+    `UPDATE signature_occurrences
+     SET status = 'resolved', updated_at = NOW()
+     WHERE id = $1 AND status <> 'resolved'
+     RETURNING *`,
+    [occurrence.id]
+  );
+
+  if (!rows[0]) {
+    return res.status(409).json({ message: "Esta ocorrência já está resolvida." });
+  }
+
+  await addOrderEvent({
+    orderId: occurrence.service_order_id,
+    actorId: req.user.id,
+    eventType: "Ocorrência resolvida",
+    message: "Ocorrência de assinatura incorreta marcada como resolvida."
+  });
+
+  return res.json(sanitizeOccurrence(rows[0], req.user));
 });
 
 ordersRouter.get("/:id", async (req, res) => {
@@ -473,10 +660,12 @@ ordersRouter.get("/:id", async (req, res) => {
       [order.id]
     ),
     query(
-      `SELECT id, item_name, terminal_model, part_number, client_name, quantity, configuration, created_at
+      `SELECT id, item_index, item_name, terminal_model, part_number, client_name, quantity, configuration,
+              packaging, battery, terminal_opening, manual, charger, minbase, label, aesthetic_cover,
+              created_at
        FROM order_items
        WHERE service_order_id = $1
-       ORDER BY created_at ASC, id ASC`,
+       ORDER BY item_index ASC, created_at ASC, id ASC`,
       [order.id]
     ),
     query(
@@ -501,7 +690,13 @@ ordersRouter.get("/:id", async (req, res) => {
       return sigWithoutHash;
     }
 
-    // Para terceiros / segundo assinante: omitir completamente nome, email, usuário, id e payload do primeiro assinante
+    // Quando a ordem está concluída (assinada), exibir os nomes dos validadores normalmente
+    if (order.status === "signed") {
+      const { signed_payload, ...rest } = sigWithoutHash;
+      return rest;
+    }
+
+    // Para terceiros / segundo assinante durante double check pendente: omitir dados para evitar viés
     const {
       key_count,
       signed_payload,
@@ -533,18 +728,9 @@ ordersRouter.get("/:id", async (req, res) => {
 
     if (!isAdmin) {
       if (safeMessage) {
-        // Remove referências a nomes de assinantes nas mensagens
-        safeMessage = safeMessage.replace(/registrada por [^.]+\./i, "registrada.");
         if (/quantidade de chaves/i.test(safeMessage) && evt.event_type === "Assinada") {
           safeMessage = safeMessage.replace(/Quantidade de chaves:\s*\d+\.\s*/i, "");
         }
-      }
-
-      // Se a ordem estiver em andamento no double check, ocultar dados do primeiro assinante para evitar viés; após conclusão, exibir nome real padronizado
-      if (order.status === "pending_signature" && evt.event_type === "Assinada" && evt.actor_id !== req.user.id) {
-        safeActorName = "Assinante";
-        safeActorEmail = null;
-        safeActorId = null;
       }
     }
 
@@ -615,8 +801,7 @@ ordersRouter.put("/:id", requireRole("requester", "admin"), async (req, res) => 
   const parsed = orderUpdateSchema.safeParse(normalizeOrderBody(req.body));
 
   if (!parsed.success) {
-    const issue = parsed.error.issues?.[0];
-    return res.status(400).json({ message: issue?.message || "Dados da ordem invalidos." });
+    return res.status(400).json({ message: formatZodError(parsed.error) });
   }
 
   const values = parsed.data;
@@ -804,35 +989,14 @@ ordersRouter.post("/:id/sign", requireRole("signer"), async (req, res) => {
         const incorrectCount = rows[0].incorrect_signatures;
 
         if (incorrectCount >= 2) {
-          const existingOcc = await client.query(
-            "SELECT id FROM signature_occurrences WHERE service_order_id = $1 AND status = 'pending'",
-            [order.id]
-          );
-          const occDesc = `Identificadas ${incorrectCount} tentativas de assinatura com divergência no double check (${firstKeyCount} vs ${secondKeyCount}).`;
-          if (existingOcc.rows.length === 0) {
-            await client.query(
-              `INSERT INTO signature_occurrences (
-                 service_order_id, order_code, user_id, user_name, error_type, attempt_count, description, status
-               )
-               VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')`,
-              [
-                order.id,
-                order.code,
-                req.user.id,
-                req.user.name,
-                "divergencia_double_check",
-                incorrectCount,
-                occDesc
-              ]
-            );
-          } else {
-            await client.query(
-              `UPDATE signature_occurrences
-               SET attempt_count = $1, user_id = $2, user_name = $3, description = $4, updated_at = NOW()
-               WHERE id = $5`,
-              [incorrectCount, req.user.id, req.user.name, occDesc, existingOcc.rows[0].id]
-            );
-          }
+          const occDesc = `Identificadas ${incorrectCount} tentativas de assinatura com divergência no double check.`;
+          await upsertActiveOccurrence(client, {
+            order,
+            user: req.user,
+            errorType: "divergencia_double_check",
+            attemptCount: incorrectCount,
+            description: occDesc
+          });
         }
 
         await client.query(
@@ -863,7 +1027,9 @@ ordersRouter.post("/:id/sign", requireRole("signer"), async (req, res) => {
     }
 
     const itemsRes = await client.query(
-      "SELECT terminal_model, part_number, client_name, quantity, configuration FROM order_items WHERE service_order_id = $1 ORDER BY id ASC",
+      `SELECT terminal_model, part_number, client_name, quantity, configuration,
+              packaging, battery, terminal_opening, manual, charger, minbase, label, aesthetic_cover
+       FROM order_items WHERE service_order_id = $1 ORDER BY item_index ASC, created_at ASC, id ASC`,
       [order.id]
     );
 
@@ -961,35 +1127,14 @@ ordersRouter.post("/:id/incorrect-signature", requireRole("signer", "admin"), as
     const reason = req.body?.reason ? ` Motivo: ${req.body.reason}.` : "";
 
     if (incorrectCount >= 2) {
-      const existingOcc = await client.query(
-        "SELECT id FROM signature_occurrences WHERE service_order_id = $1 AND status = 'pending'",
-        [order.id]
-      );
       const occDesc = `Identificadas ${incorrectCount} tentativas incorretas de assinatura.${reason}`;
-      if (existingOcc.rows.length === 0) {
-        await client.query(
-          `INSERT INTO signature_occurrences (
-             service_order_id, order_code, user_id, user_name, error_type, attempt_count, description, status
-           )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')`,
-          [
-            order.id,
-            order.code,
-            req.user.id,
-            req.user.name,
-            "assinatura_incorreta",
-            incorrectCount,
-            occDesc
-          ]
-        );
-      } else {
-        await client.query(
-          `UPDATE signature_occurrences
-           SET attempt_count = $1, user_id = $2, user_name = $3, description = $4, updated_at = NOW()
-           WHERE id = $5`,
-          [incorrectCount, req.user.id, req.user.name, occDesc, existingOcc.rows[0].id]
-        );
-      }
+      await upsertActiveOccurrence(client, {
+        order,
+        user: req.user,
+        errorType: "assinatura_incorreta",
+        attemptCount: incorrectCount,
+        description: occDesc
+      });
     }
 
     await client.query(

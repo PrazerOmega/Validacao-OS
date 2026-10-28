@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Activity,
@@ -79,6 +79,17 @@ const destinationOptions = [
   { value: "signer", label: "Suporte" }
 ];
 
+const ITEM_MANDATORY_OPTIONS = [
+  { key: "packaging", label: "Embalagem", choices: ["CAIXA", "SACO BOLHA"] },
+  { key: "battery", label: "Bateria", choices: ["SIM", "NÃO"] },
+  { key: "terminalOpening", label: "Abertura de Terminal", choices: ["SIM", "NÃO"] },
+  { key: "manual", label: "Manual", choices: ["SIM", "NÃO"] },
+  { key: "charger", label: "Carregador", choices: ["SIM", "NÃO"] },
+  { key: "minbase", label: "Minbase", choices: ["SIM", "NÃO"] },
+  { key: "label", label: "Label", choices: ["SIM", "NÃO"] },
+  { key: "aestheticCover", label: "Cobre Estético", choices: ["SIM", "NÃO"] }
+];
+
 function createEmptyItem() {
   return {
     itemName: "",
@@ -87,7 +98,15 @@ function createEmptyItem() {
     isCustomPn: false,
     clientName: "",
     quantity: 1,
-    configuration: ""
+    configuration: "",
+    packaging: "",
+    battery: "",
+    terminalOpening: "",
+    manual: "",
+    charger: "",
+    minbase: "",
+    label: "",
+    aestheticCover: ""
   };
 }
 
@@ -258,9 +277,15 @@ function App() {
   const [pendingNavigation, setPendingNavigation] = useState(null);
   const [executorTab, setExecutorTab] = useState("suporte");
   const [counts, setCounts] = useState({ suporte: 0, producao: 0, unassigned: 0 });
+  const executorTabRef = useRef(executorTab);
+
+  useEffect(() => {
+    executorTabRef.current = executorTab;
+  }, [executorTab]);
 
   function handleExecutorTabChange(tab) {
     setExecutorTab(tab);
+    executorTabRef.current = tab;
     setSelected(null);
     loadData(tab);
   }
@@ -282,6 +307,11 @@ function App() {
 
   function handleNavigateOrdersFromDashboard(statusKey) {
     safeNavigate(() => {
+      if (counts?.suporte === 0 && counts?.producao > 0 && executorTabRef.current === "suporte") {
+        setExecutorTab("producao");
+        executorTabRef.current = "producao";
+        loadData("producao");
+      }
       if (session?.user?.role === "admin") {
         setAdminStatusFilter(statusKey);
         setAdminMenu("orders");
@@ -329,12 +359,13 @@ function App() {
     setForm(createEmptyOrder(data.user.name));
   }
 
-  async function loadData(team = executorTab) {
+  async function loadData(team = executorTabRef.current) {
     if (!session) return;
 
     try {
+      const activeTeam = team || executorTabRef.current || "suporte";
       const [orderList, catalogList, countsRes] = await Promise.all([
-        api.request(`/orders?executorTeam=${team}`),
+        api.request(`/orders?executorTeam=${activeTeam}`),
         api.request("/catalog"),
         api.request("/orders/counts").catch(() => null)
       ]);
@@ -352,8 +383,7 @@ function App() {
       setSelected((prevSelected) => {
         if (!prevSelected) return null;
         const currentInList = orderList.find((o) => o.id === prevSelected.id);
-        if (!currentInList) return null;
-        if (currentInList.updated_at !== prevSelected.updated_at) {
+        if (currentInList && currentInList.updated_at !== prevSelected.updated_at) {
           api.request(`/orders/${prevSelected.id}`).then((fresh) => {
             setSelected((curr) => (curr?.id === fresh.id ? fresh : curr));
           }).catch(() => {});
@@ -373,24 +403,24 @@ function App() {
       setSignatureName(session.user.name);
     }
 
-    loadData(executorTab);
+    loadData(executorTabRef.current);
 
     // Polling controlado para refletir alterações sem sobrecarregar o banco
     const interval = setInterval(() => {
       if (!document.hidden) {
-        loadData(executorTab);
+        loadData(executorTabRef.current);
       }
     }, 8000);
 
     function handleSyncEvent() {
       if (!document.hidden) {
-        loadData(executorTab);
+        loadData(executorTabRef.current);
       }
     }
 
     const handleBroadcast = (ev) => {
       if (ev.data?.type === "SYNC") {
-        loadData(executorTab);
+        loadData(executorTabRef.current);
       }
     };
 
@@ -416,7 +446,7 @@ function App() {
   // Atualização instantânea ao alternar menus
   useEffect(() => {
     if (session) {
-      loadData();
+      loadData(executorTabRef.current);
     }
   }, [adminMenu, userMenu]);
 
@@ -425,7 +455,13 @@ function App() {
       setSelected(null);
       return;
     }
-    setSelected(await api.request(`/orders/${order.id}`));
+    const fullOrder = await api.request(`/orders/${order.id}`);
+    setSelected(fullOrder);
+    if (fullOrder?.executor_team && fullOrder.executor_team !== executorTabRef.current) {
+      setExecutorTab(fullOrder.executor_team);
+      executorTabRef.current = fullOrder.executor_team;
+      await loadData(fullOrder.executor_team);
+    }
   }
 
   function startEdit(order) {
@@ -453,7 +489,15 @@ function App() {
             isCustomPn: !isPreset && Boolean(item.part_number && item.part_number !== "-"),
             clientName: item.client_name,
             quantity: item.quantity,
-            configuration: item.configuration
+            configuration: item.configuration,
+            packaging: item.packaging || "",
+            battery: item.battery || "",
+            terminalOpening: item.terminal_opening || item.terminalOpening || "",
+            manual: item.manual || "",
+            charger: item.charger || "",
+            minbase: item.minbase || "",
+            label: item.label || "",
+            aestheticCover: item.aesthetic_cover || item.aestheticCover || ""
           };
         })
         : [{
@@ -463,7 +507,15 @@ function App() {
           isCustomPn: false,
           clientName: "-",
           quantity: 1,
-          configuration: order.usage_reason
+          configuration: order.usage_reason,
+          packaging: "",
+          battery: "",
+          terminalOpening: "",
+          manual: "",
+          charger: "",
+          minbase: "",
+          label: "",
+          aestheticCover: ""
         }]
     });
   }
@@ -474,8 +526,43 @@ function App() {
 
     for (let i = 0; i < form.items.length; i++) {
       const it = form.items[i];
+      const itemNum = i + 1;
+
       if (it.isCustomPn && (!it.partNumber || !it.partNumber.trim())) {
-        setMessage(`Informe o Part Number para o item ${i + 1} (opção "Outros").`);
+        setMessage(`Item ${itemNum}: Informe o Part Number (opção "Outros").`);
+        return;
+      }
+
+      if (!it.packaging || !["CAIXA", "SACO BOLHA"].includes(it.packaging)) {
+        setMessage(`Item ${itemNum}: Selecione a opção obrigatória "Embalagem" (CAIXA ou SACO BOLHA).`);
+        return;
+      }
+      if (!it.battery || !["SIM", "NÃO"].includes(it.battery)) {
+        setMessage(`Item ${itemNum}: Selecione a opção obrigatória "Bateria" (SIM ou NÃO).`);
+        return;
+      }
+      if (!it.terminalOpening || !["SIM", "NÃO"].includes(it.terminalOpening)) {
+        setMessage(`Item ${itemNum}: Selecione a opção obrigatória "Abertura de Terminal" (SIM ou NÃO).`);
+        return;
+      }
+      if (!it.manual || !["SIM", "NÃO"].includes(it.manual)) {
+        setMessage(`Item ${itemNum}: Selecione a opção obrigatória "Manual" (SIM ou NÃO).`);
+        return;
+      }
+      if (!it.charger || !["SIM", "NÃO"].includes(it.charger)) {
+        setMessage(`Item ${itemNum}: Selecione a opção obrigatória "Carregador" (SIM ou NÃO).`);
+        return;
+      }
+      if (!it.minbase || !["SIM", "NÃO"].includes(it.minbase)) {
+        setMessage(`Item ${itemNum}: Selecione a opção obrigatória "Minbase" (SIM ou NÃO).`);
+        return;
+      }
+      if (!it.label || !["SIM", "NÃO"].includes(it.label)) {
+        setMessage(`Item ${itemNum}: Selecione a opção obrigatória "Label" (SIM ou NÃO).`);
+        return;
+      }
+      if (!it.aestheticCover || !["SIM", "NÃO"].includes(it.aestheticCover)) {
+        setMessage(`Item ${itemNum}: Selecione a opção obrigatória "Cobre Estético" (SIM ou NÃO).`);
         return;
       }
     }
@@ -868,10 +955,14 @@ function App() {
         ) : userMenu === "occurrences" ? (
           <OccurrencesPanel
             api={api}
-            onSelectOrder={(orderId) => {
+            onSelectOrder={async (orderId) => {
               setUserMenu("orders");
-              const found = orders.find((o) => o.id === orderId);
-              if (found) selectOrder(found);
+              try {
+                const fullOrder = await api.request(`/orders/${orderId}`);
+                await selectOrder(fullOrder);
+              } catch (err) {
+                console.error("Erro ao carregar ordem da ocorrência:", err);
+              }
             }}
           />
         ) : session.user.role === "requester" && userMenu === "create" ? (
@@ -1007,7 +1098,10 @@ function App() {
                     setEditingId(null);
                     setForm(createEmptyOrder(session?.user?.name ?? ""));
                     setUserMenu("orders");
-                    await loadData();
+                    const targetTeam = postSaveModalOrder.executor_team || "suporte";
+                    setExecutorTab(targetTeam);
+                    executorTabRef.current = targetTeam;
+                    await loadData(targetTeam);
                     if (result?.order) {
                       await selectOrder(result.order);
                     }
@@ -1144,7 +1238,15 @@ function OrderForm({ form, setForm, catalog, editingId, onSubmit, onCancel, onDi
           isCustomPn: false,
           clientName: "",
           quantity: 1,
-          configuration: ""
+          configuration: "",
+          packaging: "",
+          battery: "",
+          terminalOpening: "",
+          manual: "",
+          charger: "",
+          minbase: "",
+          label: "",
+          aestheticCover: ""
         }
       ]
     }));
@@ -1312,6 +1414,46 @@ function OrderForm({ form, setForm, catalog, editingId, onSubmit, onCancel, onDi
                 Configuracao
                 <textarea value={item.configuration} onChange={(event) => updateItem(index, "configuration", event.target.value)} required />
               </label>
+
+              <div className="item-mandatory-options">
+                <div className="item-options-header">
+                  <div className="item-options-badge">Opções Obrigatórias do Item {index + 1}</div>
+                  <span className="item-options-hint">Selecione uma opção para cada campo (nenhum campo pré-selecionado)</span>
+                </div>
+                <div className="item-options-grid">
+                  {ITEM_MANDATORY_OPTIONS.map((opt) => {
+                    const currentValue = item[opt.key] || "";
+                    return (
+                      <div className="item-option-field" key={opt.key}>
+                        <div className="item-option-label-row">
+                          <span className="item-option-title">{opt.label}</span>
+                          <span className="item-option-required">*</span>
+                          {currentValue && (
+                            <span className="item-option-selected-badge">{currentValue}</span>
+                          )}
+                        </div>
+                        <div className="segmented-control item-options-segmented" role="radiogroup" aria-label={opt.label}>
+                          {opt.choices.map((choice) => {
+                            const isSelected = currentValue === choice;
+                            return (
+                              <button
+                                key={choice}
+                                type="button"
+                                role="radio"
+                                aria-checked={isSelected}
+                                className={`item-option-btn ${isSelected ? "active" : ""}`}
+                                onClick={() => updateItem(index, opt.key, choice)}
+                              >
+                                {choice}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
             </article>
           );
         })}
@@ -2923,14 +3065,28 @@ function OrderDetails({
             <span>Quantia</span>
             {!isSpectator && <span>Configuracao</span>}
           </div>
-          {items.map((item) => (
-            <div className={`items-table-row ${isSpectator ? "spectator" : ""}`} key={item.id}>
-              <span>{item.terminal_model}</span>
-              <span>{item.part_number}</span>
-              <span>{item.client_name}</span>
-              <span>{item.item_name || "—"}</span>
-              <span>{item.quantity}</span>
-              {!isSpectator && <span>{item.configuration}</span>}
+          {items.map((item, idx) => (
+            <div className="item-detail-card" key={item.id || idx}>
+              <div className={`items-table-row ${isSpectator ? "spectator" : ""}`}>
+                <span>{item.terminal_model}</span>
+                <span>{item.part_number}</span>
+                <span>{item.client_name}</span>
+                <span>{item.item_name || "—"}</span>
+                <span>{item.quantity}</span>
+                {!isSpectator && <span>{item.configuration}</span>}
+              </div>
+              {(item.packaging || item.battery || item.terminal_opening || item.manual || item.charger || item.minbase || item.label || item.aesthetic_cover) && (
+                <div className="item-detail-options-chips">
+                  <span className="item-opt-chip"><strong>Embalagem:</strong> {item.packaging || "—"}</span>
+                  <span className="item-opt-chip"><strong>Bateria:</strong> {item.battery || "—"}</span>
+                  <span className="item-opt-chip"><strong>Abertura Terminal:</strong> {item.terminal_opening || item.terminalOpening || "—"}</span>
+                  <span className="item-opt-chip"><strong>Manual:</strong> {item.manual || "—"}</span>
+                  <span className="item-opt-chip"><strong>Carregador:</strong> {item.charger || "—"}</span>
+                  <span className="item-opt-chip"><strong>Minbase:</strong> {item.minbase || "—"}</span>
+                  <span className="item-opt-chip"><strong>Label:</strong> {item.label || "—"}</span>
+                  <span className="item-opt-chip"><strong>Cobre Estético:</strong> {item.aesthetic_cover || item.aestheticCover || "—"}</span>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -3058,11 +3214,13 @@ function OrderDetails({
         {signatures.map((signature, index) => {
           const isCurrentUser = signature.signer_id === session.user.id;
           const isAdmin = session.user.role === "admin";
-          const displayName = isAdmin
-            ? (signature.display_signer_name ?? signature.user_name ?? `Assinante ${index + 1}`)
+          const isSigned = selected.status === "signed";
+          const realName = signature.display_signer_name ?? signature.user_name ?? signature.signer_name;
+          const displayName = (isAdmin || isSigned) && realName
+            ? realName
             : isCurrentUser
-              ? "Sua assinatura registrada"
-              : `Assinatura ${index + 1} registrada`;
+              ? (realName ? `Sua assinatura registrada (${realName})` : "Sua assinatura registrada")
+              : (realName || `Assinatura ${index + 1} registrada`);
 
           return (
             <article className="signature-box" key={signature.id || index}>

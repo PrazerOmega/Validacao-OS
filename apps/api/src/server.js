@@ -11,7 +11,34 @@ import { requireAuth } from "./middleware/auth.js";
 const app = express();
 const port = Number(process.env.PORT ?? 3333);
 
-app.use(cors({ origin: process.env.CORS_ORIGIN ?? "http://localhost:5173" }));
+const rawCorsOrigin = process.env.CORS_ORIGIN;
+
+const isOriginAllowed = (origin) => {
+  if (!origin) return true;
+  if (!rawCorsOrigin || rawCorsOrigin === "*") return true;
+
+  const allowedOrigins = rawCorsOrigin.split(",").map((s) => s.trim());
+  if (allowedOrigins.includes(origin) || allowedOrigins.includes("*")) return true;
+
+  // Permite conexões locais e de rede local (LAN: 192.168.x.x, 10.x.x.x, 172.16-31.x.x, localhost)
+  const isLanOrLocal =
+    /^https?:\/\/localhost(:\d+)?$/.test(origin) ||
+    /^https?:\/\/127\.0\.0\.1(:\d+)?$/.test(origin) ||
+    /^https?:\/\/(192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)(:\d+)?$/.test(origin);
+
+  return isLanOrLocal;
+};
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (isOriginAllowed(origin)) {
+        return callback(null, true);
+      }
+      return callback(null, false);
+    },
+  })
+);
 app.use(express.json());
 
 app.get("/health", (_req, res) => {
@@ -29,6 +56,6 @@ app.use((error, _req, res, _next) => {
   res.status(500).json({ message: "Erro interno." });
 });
 
-app.listen(port, () => {
+app.listen(port, "0.0.0.0", () => {
   console.log(`API ouvindo em http://localhost:${port}`);
 });

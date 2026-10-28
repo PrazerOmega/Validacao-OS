@@ -120,7 +120,15 @@ async function runDashboardOccurrencesTests() {
           partNumber: "PN-TESTE-OCC",
           clientName: "Cliente Ocorrência",
           quantity: 4,
-          configuration: "Configuração Padrão"
+          configuration: "Configuração Padrão",
+          packaging: "CAIXA",
+          battery: "SIM",
+          terminalOpening: "SIM",
+          manual: "SIM",
+          charger: "SIM",
+          minbase: "SIM",
+          label: "SIM",
+          aestheticCover: "SIM"
         }
       ]
     })

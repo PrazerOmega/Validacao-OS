@@ -107,6 +107,56 @@ ALTER TABLE service_orders ALTER COLUMN signature_due_at SET NOT NULL;
 ALTER TABLE service_orders DROP CONSTRAINT IF EXISTS service_orders_order_type_check;
 ALTER TABLE service_orders DROP CONSTRAINT IF EXISTS service_orders_item_identifier_check;
 
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS packaging TEXT;
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS battery TEXT;
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS terminal_opening TEXT;
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS manual TEXT;
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS charger TEXT;
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS minbase TEXT;
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS label TEXT;
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS aesthetic_cover TEXT;
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS item_index INTEGER DEFAULT 0;
+
+DO $$ BEGIN
+  ALTER TABLE order_items ADD CONSTRAINT order_items_packaging_check
+    CHECK (packaging IS NULL OR packaging IN ('CAIXA', 'SACO BOLHA'));
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+DO $$ BEGIN
+  ALTER TABLE order_items ADD CONSTRAINT order_items_battery_check
+    CHECK (battery IS NULL OR battery IN ('SIM', 'NÃO'));
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+DO $$ BEGIN
+  ALTER TABLE order_items ADD CONSTRAINT order_items_terminal_opening_check
+    CHECK (terminal_opening IS NULL OR terminal_opening IN ('SIM', 'NÃO'));
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+DO $$ BEGIN
+  ALTER TABLE order_items ADD CONSTRAINT order_items_manual_check
+    CHECK (manual IS NULL OR manual IN ('SIM', 'NÃO'));
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+DO $$ BEGIN
+  ALTER TABLE order_items ADD CONSTRAINT order_items_charger_check
+    CHECK (charger IS NULL OR charger IN ('SIM', 'NÃO'));
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+DO $$ BEGIN
+  ALTER TABLE order_items ADD CONSTRAINT order_items_minbase_check
+    CHECK (minbase IS NULL OR minbase IN ('SIM', 'NÃO'));
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+DO $$ BEGIN
+  ALTER TABLE order_items ADD CONSTRAINT order_items_label_check
+    CHECK (label IS NULL OR label IN ('SIM', 'NÃO'));
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+DO $$ BEGIN
+  ALTER TABLE order_items ADD CONSTRAINT order_items_aesthetic_cover_check
+    CHECK (aesthetic_cover IS NULL OR aesthetic_cover IN ('SIM', 'NÃO'));
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
 INSERT INTO order_items (
   service_order_id, item_name, terminal_model, part_number, client_name, quantity, configuration
 )
@@ -212,4 +262,8 @@ CREATE TABLE IF NOT EXISTS signature_occurrences (
 
 CREATE INDEX IF NOT EXISTS idx_signature_occurrences_order ON signature_occurrences(service_order_id);
 CREATE INDEX IF NOT EXISTS idx_signature_occurrences_status ON signature_occurrences(status);
+-- Garante no máximo uma ocorrência ativa (não resolvida) por OS, mesmo com requisições simultâneas
+CREATE UNIQUE INDEX IF NOT EXISTS uq_signature_occurrences_active_order
+  ON signature_occurrences(service_order_id)
+  WHERE status <> 'resolved';
 

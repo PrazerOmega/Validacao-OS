@@ -12,6 +12,15 @@ export function isEmailConfigured() {
   );
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 export function formatOccurrenceEmail(occurrence, order = {}) {
   const code = order.code || occurrence.order_code || "N/A";
   const dateFormatted = new Intl.DateTimeFormat("pt-BR", {
@@ -69,12 +78,12 @@ Nenhum dado confidencial, senha ou chave privada é exposto neste e-mail.
       ⚠️ Alerta Operacional: Tentativas Incorretas de Assinatura
     </div>
     <div class="content">
-      <p>A Ordem de Serviço <strong>${code}</strong> registrou <strong>${occurrence.attempt_count} tentativas incorretas</strong> durante a validação.</p>
+      <p>A Ordem de Serviço <strong>${escapeHtml(code)}</strong> registrou <strong>${escapeHtml(occurrence.attempt_count)} tentativas incorretas</strong> durante a validação.</p>
       
       <table class="info-table">
         <tr>
           <td class="label">Código da OS</td>
-          <td class="val"><strong>${code}</strong></td>
+          <td class="val"><strong>${escapeHtml(code)}</strong></td>
         </tr>
         <tr>
           <td class="label">Data e Hora</td>
@@ -82,19 +91,19 @@ Nenhum dado confidencial, senha ou chave privada é exposto neste e-mail.
         </tr>
         <tr>
           <td class="label">Usuário Envolvido</td>
-          <td class="val">${occurrence.user_name || "Assinante"}</td>
+          <td class="val">${escapeHtml(occurrence.user_name || "Assinante")}</td>
         </tr>
         <tr>
           <td class="label">Tentativas Incorretas</td>
-          <td class="val"><span class="badge">${occurrence.attempt_count} tentativas</span></td>
+          <td class="val"><span class="badge">${escapeHtml(occurrence.attempt_count)} tentativas</span></td>
         </tr>
         <tr>
           <td class="label">Motivo / Descrição</td>
-          <td class="val">${occurrence.description || "Divergência de chaves informada"}</td>
+          <td class="val">${escapeHtml(occurrence.description || "Divergência de chaves informada")}</td>
         </tr>
         <tr>
           <td class="label">Status da Ordem</td>
-          <td class="val">${order.status || "pending_signature"}</td>
+          <td class="val">${escapeHtml(order.status || "pending_signature")}</td>
         </tr>
       </table>
 
@@ -111,33 +120,110 @@ Nenhum dado confidencial, senha ou chave privada é exposto neste e-mail.
   return { subject, bodyText, bodyHtml };
 }
 
+const EMAIL_REGEX = /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/;
+
+/**
+ * Normaliza e valida uma lista de destinatários separada por vírgula/ponto e vírgula.
+ * Retorna null se algum endereço for inválido.
+ */
+export function parseRecipients(raw) {
+  if (!raw || typeof raw !== "string") return [];
+  const list = raw
+    .split(/[,;]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (list.length > 10) return null;
+  return list.every((item) => EMAIL_REGEX.test(item)) ? list : null;
+}
+
+let cachedTransporter = null;
+
+async function getTransporter() {
+  if (cachedTransporter) return cachedTransporter;
+  const { default: nodemailer } = await import("nodemailer");
+  const port = Number(process.env.SMTP_PORT);
+  cachedTransporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port,
+    secure: process.env.SMTP_SECURE ? process.env.SMTP_SECURE === "true" : port === 465,
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS
+    }
+  });
+  return cachedTransporter;
+}
+
+/**
+ * Envia (ou apenas prepara, se o SMTP não estiver configurado) o e-mail de uma ocorrência.
+ * Nunca inventa destinatários: usa o informado ou NOTIFICATION_EMAIL.
+ * Só retorna success=true quando o servidor SMTP aceitou a mensagem.
+ */
 export async function sendOccurrenceEmail({ occurrence, order = {}, recipient }) {
-  const targetRecipient = recipient || process.env.NOTIFICATION_EMAIL || "gestao@empresa.com";
+  const rawRecipient = recipient || process.env.NOTIFICATION_EMAIL || "";
+  const recipients = parseRecipients(rawRecipient);
   const { subject, bodyText, bodyHtml } = formatOccurrenceEmail(occurrence, order);
 
-  if (!isEmailConfigured()) {
-    console.log(`[EmailService] SMTP não configurado. E-mail preparado com sucesso para "${targetRecipient}": Assunto="${subject}"`);
+  if (recipients === null) {
     return {
       success: false,
-      configured: false,
-      recipient: targetRecipient,
-      subject,
-      reason: "Serviço SMTP não configurado no ambiente. Para habilitar o envio em produção, configure SMTP_HOST, SMTP_PORT, SMTP_USER e SMTP_PASS no arquivo .env.",
-      preview: {
-        to: targetRecipient,
-        subject,
-        bodyText
-      }
+      configured: isEmailConfigured(),
+      errorCode: "invalid_recipient",
+      reason: "Destinatário de e-mail inválido."
     };
   }
 
-  // Quando configurado no ambiente, simular/executar envio seguro
-  console.log(`[EmailService] Enviando e-mail de alerta para "${targetRecipient}" via ${process.env.SMTP_HOST}...`);
-  return {
-    success: true,
-    configured: true,
-    recipient: targetRecipient,
-    subject,
-    sentAt: new Date().toISOString()
-  };
+  if (recipients.length === 0) {
+    return {
+      success: false,
+      configured: isEmailConfigured(),
+      errorCode: "missing_recipient",
+      reason: "Nenhum destinatário informado e NOTIFICATION_EMAIL não está configurado.",
+      preview: { to: null, subject, bodyText }
+    };
+  }
+
+  const to = recipients.join(", ");
+
+  if (!isEmailConfigured()) {
+    return {
+      success: false,
+      configured: false,
+      errorCode: "smtp_not_configured",
+      recipient: to,
+      subject,
+      reason: "Serviço SMTP não configurado. Configure SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS e SMTP_FROM no arquivo .env para habilitar o envio. Nenhum e-mail foi enviado.",
+      preview: { to, subject, bodyText }
+    };
+  }
+
+  try {
+    const transporter = await getTransporter();
+    const info = await transporter.sendMail({
+      from: process.env.SMTP_FROM || process.env.SMTP_USER,
+      to,
+      subject,
+      text: bodyText,
+      html: bodyHtml
+    });
+    return {
+      success: true,
+      configured: true,
+      recipient: to,
+      subject,
+      messageId: info.messageId,
+      sentAt: new Date().toISOString()
+    };
+  } catch (error) {
+    console.error("[EmailService] Falha ao enviar e-mail de ocorrência:", error.message);
+    return {
+      success: false,
+      configured: true,
+      errorCode: "send_failed",
+      recipient: to,
+      subject,
+      reason: "Falha ao enviar o e-mail pelo servidor SMTP. Verifique as configurações e tente novamente."
+    };
+  }
 }
+

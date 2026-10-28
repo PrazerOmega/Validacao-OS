@@ -66,7 +66,15 @@ async function runAuditValidationTests() {
           partNumber: customPn,
           clientName: "Cliente Audit",
           quantity: 2,
-          configuration: "Config Audit"
+          configuration: "Config Audit",
+          packaging: "CAIXA",
+          battery: "SIM",
+          terminalOpening: "SIM",
+          manual: "SIM",
+          charger: "SIM",
+          minbase: "SIM",
+          label: "SIM",
+          aestheticCover: "SIM"
         }
       ]
     })

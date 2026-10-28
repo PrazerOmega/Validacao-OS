@@ -69,7 +69,15 @@ async function runTests() {
           partNumber: samplePN,
           clientName: "Cliente Teste Suporte",
           quantity: 2,
-          configuration: "Configuração para Suporte"
+          configuration: "Configuração para Suporte",
+          packaging: "CAIXA",
+          battery: "SIM",
+          terminalOpening: "SIM",
+          manual: "SIM",
+          charger: "SIM",
+          minbase: "SIM",
+          label: "SIM",
+          aestheticCover: "SIM"
         }
       ]
     })
@@ -113,7 +121,15 @@ async function runTests() {
           partNumber: samplePN,
           clientName: "Cliente Teste Produção",
           quantity: 3,
-          configuration: "Configuração para Produção"
+          configuration: "Configuração para Produção",
+          packaging: "SACO BOLHA",
+          battery: "SIM",
+          terminalOpening: "SIM",
+          manual: "SIM",
+          charger: "SIM",
+          minbase: "SIM",
+          label: "SIM",
+          aestheticCover: "SIM"
         }
       ]
     })
@@ -209,7 +225,15 @@ async function runTests() {
           partNumber: samplePN,
           clientName: "Cliente Teste Produção Ajustado",
           quantity: 3,
-          configuration: "Configuração de produção corrigida"
+          configuration: "Configuração de produção corrigida",
+          packaging: "SACO BOLHA",
+          battery: "SIM",
+          terminalOpening: "SIM",
+          manual: "SIM",
+          charger: "SIM",
+          minbase: "SIM",
+          label: "SIM",
+          aestheticCover: "SIM"
         }
       ]
     })
@@ -385,7 +409,7 @@ async function runTests() {
       orderType: sampleOrderType,
       executorTeam: "financeiro_invalido",
       validFrom: new Date().toISOString().slice(0, 10),
-      items: [{ itemIdentifier: sampleModel, partNumber: samplePN, clientName: "Teste", quantity: 1, configuration: "-" }]
+      items: [{ itemIdentifier: sampleModel, partNumber: samplePN, clientName: "Teste", quantity: 1, configuration: "-", packaging: "CAIXA", battery: "SIM", terminalOpening: "SIM", manual: "SIM", charger: "SIM", minbase: "SIM", label: "SIM", aestheticCover: "SIM" }]
     })
   });
   assert.equal(invalidTeamRes.status, 400, "Backend DEVE rejeitar equipe executora diferente de suporte ou producao");

@@ -125,7 +125,15 @@ async function runDashboardTests() {
           partNumber: partNumber,
           clientName: "Cliente Teste",
           quantity: 2,
-          configuration: "Config 1"
+          configuration: "Config 1",
+          packaging: "CAIXA",
+          battery: "SIM",
+          terminalOpening: "SIM",
+          manual: "SIM",
+          charger: "SIM",
+          minbase: "SIM",
+          label: "SIM",
+          aestheticCover: "SIM"
         }
       ]
     })

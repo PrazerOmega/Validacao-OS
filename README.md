@@ -7,7 +7,7 @@ Aplicacao para criar, revisar, assinar digitalmente e manter historico de ordens
 - `requester` (Operacoes): cria, edita e envia ordens para o estoque.
 - `stock` (Estoque): confere a quantidade de cada linha de item e os acessorios que acompanham o terminal (bateria, carregador, etc.), registra o resultado (completo, parcial ou pendencia de estoque) e libera a ordem ao suporte.
 - `signer` (Suporte): assina ordens pendentes ou solicita correcao.
-- `spectator` (Espectador): visualiza as ordens, sem poder alterar.
+- `spectator` (Producao): visualiza as ordens como guia para preparar os terminais, sem poder alterar.
 - `admin`: gerencia usuarios e acompanha todas as ordens.
 
 ## Stack

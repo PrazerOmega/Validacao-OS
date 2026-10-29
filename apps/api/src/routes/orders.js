@@ -1311,7 +1311,8 @@ ordersRouter.post("/:id/sign", requireRole("signer"), async (req, res) => {
       return res.status(409).json({ message: "Este usuario ja assinou esta ordem." });
     }
 
-    const signerName = req.user.name;
+    // Quem assinou fica identificado pelo e-mail do usuario logado, sem edicao manual
+    const signerName = req.user.email;
     const keyCount = parsed.data.keyCount;
     const isSecondSigner = existingSignatures.rows.length === 1;
 

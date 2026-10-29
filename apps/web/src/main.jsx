@@ -103,7 +103,7 @@ const roleOptions = [
   { value: "requester", label: "Operações" },
   { value: "signer", label: "Suporte" },
   { value: "stock", label: "Estoque" },
-  { value: "spectator", label: "Espectador" },
+  { value: "spectator", label: "Produção" },
   { value: "admin", label: "Admin" }
 ];
 
@@ -390,7 +390,7 @@ function App() {
   function login(data) {
     localStorage.setItem("ordens:session", JSON.stringify(data));
     setSession(data);
-    setSignatureName(data.user.name);
+    setSignatureName(data.user.email);
     setForm(createEmptyOrder(data.user.name));
   }
 
@@ -435,7 +435,7 @@ function App() {
     if (!session) return;
 
     if (!signatureName) {
-      setSignatureName(session.user.name);
+      setSignatureName(session.user.email);
     }
 
     loadData(executorTabRef.current);
@@ -1597,7 +1597,7 @@ function DashboardPanel({ session, api, onNavigateOrders }) {
     admin: "Administrador",
     requester: "Operações",
     signer: "Suporte",
-    spectator: "Espectador",
+    spectator: "Produção",
     stock: "Estoque"
   }[userRole] || "Usuário";
   const showStockMetrics = ["admin", "requester", "stock"].includes(userRole);
@@ -3597,7 +3597,7 @@ function OrderDetails({
           const isCurrentUser = signature.signer_id === session.user.id;
           const isAdmin = session.user.role === "admin";
           const isSigned = selected.status === "signed";
-          const realName = signature.display_signer_name ?? signature.user_name ?? signature.signer_name;
+          const realName = signature.signer_email ?? signature.display_signer_name ?? signature.user_name ?? signature.signer_name;
           const displayName = (isAdmin || isSigned) && realName
             ? realName
             : isCurrentUser

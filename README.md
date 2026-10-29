@@ -5,9 +5,9 @@ Aplicacao para criar, revisar, assinar digitalmente e manter historico de ordens
 ## Perfis
 
 - `requester` (Operacoes): cria, edita e envia ordens para o estoque.
-- `stock` (Estoque): marca a separacao de cada item (Pendente, Sem estoque, Em separacao, Separado), envia para assinatura ou devolve para operacoes.
+- `stock` (Estoque): confere a quantidade de cada linha de item e os acessorios que acompanham o terminal (bateria, carregador, etc.), registra o resultado (completo, parcial ou pendencia de estoque) e libera a ordem ao suporte.
 - `signer` (Suporte): assina ordens pendentes ou solicita correcao.
-- `spectator` (Producao): visualiza as ordens como guia para preparar os terminais.
+- `spectator` (Espectador): visualiza as ordens, sem poder alterar.
 - `admin`: gerencia usuarios e acompanha todas as ordens.
 
 ## Stack
@@ -60,16 +60,29 @@ Senha padrao: `123456`
 - Admin: `admin@empresa.com`
 - Solicitante: `solicitante@empresa.com`
 - Assinante: `assinante@empresa.com`
+- Assinante 2: `assinante2@empresa.com`
+- Espectador: `espectador@empresa.com`
 - Estoque: `estoque@empresa.com`
 
 ## Fluxo principal
 
 1. Operacoes cria ordem em rascunho.
-2. Operacoes envia a ordem ao estoque (`awaiting_stock`).
-3. Estoque marca a separacao de cada item. Com todos os itens separados, envia para assinatura; se faltar terminal, pode devolver para operacoes.
-4. Suporte assina (duas assinaturas) ou pede correcao.
-5. Operacoes corrige e reenvia (a ordem volta ao estoque).
-6. Todas as mudancas geram eventos no historico.
+2. Operacoes envia a ordem; toda OS (suporte ou producao) vai para o estoque (`awaiting_stock_check`).
+3. Estoque inicia a conferencia (`stock_checking`) e registra, por linha, a quantidade conferida, observacoes e os acessorios que acompanham o terminal.
+   - Resultado **completo**: a ordem vai para separacao (`stock_picking`) e, ao liberar, segue para assinatura (`pending_signature`). Completo nao e aceito com item faltando.
+   - Resultado **parcial** ou **pendencia de estoque**: a ordem volta para Operacoes (`stock_returned`).
+4. Com a ordem em retorno do estoque, Operacoes pode: encaminhar ao suporte com justificativa obrigatoria (registrada no historico), devolver ao estoque para nova conferencia ou editar a OS (volta a rascunho).
+5. Suporte assina (duas assinaturas) ou pede correcao.
+6. Operacoes corrige e reenvia; a ordem passa de novo pelo estoque.
+7. Todas as mudancas geram eventos no historico.
+
+## Testes
+
+Com a API rodando (`npm run dev:api`) e o banco preparado (`npm run db:setup`):
+
+```bash
+npm test
+```
 
 ## Assinatura digital
 

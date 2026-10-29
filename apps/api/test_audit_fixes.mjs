@@ -23,6 +23,29 @@ async function login(email, password = "123456") {
   return res.data.token;
 }
 
+// Toda OS enviada passa pela conferência do Estoque antes de chegar ao Suporte
+async function passThroughStock(orderId, stockToken) {
+  const auth = { Authorization: `Bearer ${stockToken}` };
+  const startRes = await request(`/orders/${orderId}/stock/start`, { method: "POST", headers: auth });
+  assert.equal(startRes.status, 200, `Falha ao iniciar conferência: ${JSON.stringify(startRes.data)}`);
+
+  const detailRes = await request(`/orders/${orderId}`, { headers: auth });
+  const checkRes = await request(`/orders/${orderId}/stock/check`, {
+    method: "POST",
+    headers: auth,
+    body: JSON.stringify({
+      result: "complete",
+      items: detailRes.data.items.map((item) => ({ id: item.id, checkedQuantity: item.quantity }))
+    })
+  });
+  assert.equal(checkRes.status, 200, `Falha ao registrar conferência: ${JSON.stringify(checkRes.data)}`);
+
+  const releaseRes = await request(`/orders/${orderId}/stock/release`, { method: "POST", headers: auth });
+  assert.equal(releaseRes.status, 200, `Falha ao liberar ao Suporte: ${JSON.stringify(releaseRes.data)}`);
+  assert.equal(releaseRes.data.status, "pending_signature");
+  return releaseRes.data;
+}
+
 async function runAuditValidationTests() {
   console.log("================================================================================");
   console.log("TESTES ESPECÍFICOS DAS CORREÇÕES DA AUDITORIA");
@@ -33,6 +56,7 @@ async function runAuditValidationTests() {
   const requesterToken = await login("solicitante@empresa.com");
   const signerToken = await login("assinante@empresa.com");
   const signer2Token = await login("assinante2@empresa.com");
+  const stockToken = await login("estoque@empresa.com");
 
   // Teste 1: Duplicação de e-mail retorna 409 amigável
   console.log("▶ [Fix 1] Testando tratamento de e-mail duplicado...");
@@ -95,6 +119,7 @@ async function runAuditValidationTests() {
     method: "POST",
     headers: { Authorization: `Bearer ${requesterToken}` }
   });
+  await passThroughStock(orderId, stockToken);
 
   const sign1Res = await request(`/orders/${orderId}/sign`, {
     method: "POST",

@@ -20,6 +20,8 @@ dashboardRouter.get("/", async (req, res) => {
       baseFilter = `WHERE destination_role = $${params.length} AND status != 'draft'`;
     } else if (userRole === "spectator") {
       baseFilter = "WHERE status != 'draft'";
+    } else if (userRole === "stock") {
+      baseFilter = `WHERE (status::text IN ('awaiting_stock_check', 'stock_checking', 'stock_picking', 'stock_returned') OR stock_checker_id IS NOT NULL)`;
     } else {
       // Admin: visão geral de todas as ordens
       baseFilter = "";
@@ -31,7 +33,10 @@ dashboardRouter.get("/", async (req, res) => {
         COUNT(*) FILTER (WHERE status = 'pending_signature')::int AS "awaitingValidation",
         COUNT(*) FILTER (WHERE status = 'correction_requested')::int AS "awaitingCorrection",
         COUNT(*) FILTER (WHERE status = 'signed')::int AS "approved",
-        COUNT(*) FILTER (WHERE status = 'divergent' OR incorrect_signatures > 0)::int AS "divergent"
+        COUNT(*) FILTER (WHERE status = 'divergent' OR incorrect_signatures > 0)::int AS "divergent",
+        COUNT(*) FILTER (WHERE status::text IN ('awaiting_stock_check', 'stock_checking'))::int AS "awaitingStockCheck",
+        COUNT(*) FILTER (WHERE status::text = 'stock_picking')::int AS "stockPicking",
+        COUNT(*) FILTER (WHERE status::text = 'stock_returned')::int AS "stockReturned"
       FROM service_orders
       ${baseFilter}
     `;
@@ -42,7 +47,10 @@ dashboardRouter.get("/", async (req, res) => {
       awaitingValidation: 0,
       awaitingCorrection: 0,
       approved: 0,
-      divergent: 0
+      divergent: 0,
+      awaitingStockCheck: 0,
+      stockPicking: 0,
+      stockReturned: 0
     };
 
     // 1. Gráfico de notas / ordens de serviço realizadas por período

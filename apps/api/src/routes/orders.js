@@ -141,6 +141,37 @@ const orderUpdateSchema = orderSchema.extend({
   executorTeam: executorTeamSchema.optional()
 });
 
+// Acessórios que podem acompanhar o terminal na conferência do Estoque
+const STOCK_ACCESSORY_LABELS = {
+  battery: "Bateria",
+  charger: "Carregador",
+  manual: "Manual",
+  minbase: "Minbase",
+  label: "Label",
+  aesthetic_cover: "Cobre estético",
+  packaging: "Embalagem"
+};
+const STOCK_ACCESSORIES = Object.keys(STOCK_ACCESSORY_LABELS);
+
+const stockCheckSchema = z.object({
+  result: z.enum(["complete", "partial", "shortage"], {
+    errorMap: () => ({ message: "O resultado da conferência deve ser completo, parcial ou pendência de estoque." })
+  }),
+  accessoriesNote: z.string().optional().nullable().transform((val) => val?.trim() || null),
+  items: z.array(z.object({
+    id: z.string().uuid("Item inválido."),
+    checkedQuantity: z.coerce.number().int("A quantidade conferida deve ser um número inteiro.").min(0, "A quantidade conferida não pode ser negativa."),
+    note: z.string().optional().nullable().transform((val) => val?.trim() || null),
+    accessories: z.array(z.enum(STOCK_ACCESSORIES, {
+      errorMap: () => ({ message: "Acessório inválido na conferência." })
+    })).optional().default([]).transform((list) => [...new Set(list)])
+  })).min(1, "Informe a conferência de todos os itens.")
+});
+
+const stockForwardSchema = z.object({
+  justification: z.string().trim().min(5, "A justificativa é obrigatória (mínimo de 5 caracteres).")
+});
+
 const feedbackSchema = z.object({
   message: z.string().min(5)
 });
@@ -154,10 +185,21 @@ const signatureSchema = z.object({
     .transform((val) => Number(val))
 });
 
+const STOCK_STATUSES = ["awaiting_stock_check", "stock_checking", "stock_picking", "stock_returned"];
+// O Estoque vê as ordens em conferência e as que já passaram por ele
+const STOCK_VISIBILITY_SQL = `(so.status::text IN (${STOCK_STATUSES.map((status) => `'${status}'`).join(", ")}) OR so.stock_checker_id IS NOT NULL)`;
+
+const STOCK_RESULT_LABELS = {
+  complete: "completo",
+  partial: "parcial",
+  shortage: "pendência de estoque"
+};
+
 function canSeeOrder(user, order) {
   if (user.role === "admin") return true;
   if (order.requester_id === user.id) return true;
   if (order.status === "draft") return false;
+  if (user.role === "stock") return STOCK_STATUSES.includes(order.status) || Boolean(order.stock_checker_id);
   return user.role === "spectator" || order.destination_role === user.role;
 }
 
@@ -295,6 +337,10 @@ ordersRouter.get("/", async (req, res) => {
 
   if (req.user.role === "spectator") {
     filters.push("so.status != 'draft'");
+  }
+
+  if (req.user.role === "stock") {
+    filters.push(STOCK_VISIBILITY_SQL);
   }
 
   const executorTeam = req.query.executorTeam || req.query.executor_team;
@@ -507,6 +553,10 @@ ordersRouter.get("/counts", async (req, res) => {
     filters.push("so.status != 'draft'");
   }
 
+  if (req.user.role === "stock") {
+    filters.push(STOCK_VISIBILITY_SQL);
+  }
+
   const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
   const { rows } = await query(
     `SELECT so.executor_team, COUNT(*)::int AS count
@@ -662,7 +712,7 @@ ordersRouter.get("/:id", async (req, res) => {
     query(
       `SELECT id, item_index, item_name, terminal_model, part_number, client_name, quantity, configuration,
               packaging, battery, terminal_opening, manual, charger, minbase, label, aesthetic_cover,
-              created_at
+              stock_checked_quantity, stock_note, stock_accessories, created_at
        FROM order_items
        WHERE service_order_id = $1
        ORDER BY item_index ASC, created_at ASC, id ASC`,
@@ -794,8 +844,8 @@ ordersRouter.put("/:id", requireRole("requester", "admin"), async (req, res) => 
     return res.status(403).json({ message: "Permissao insuficiente." });
   }
 
-  if (!["draft", "correction_requested", "divergent"].includes(order.status)) {
-    return res.status(409).json({ message: "Apenas rascunhos ou ordens em correcao podem ser editadas." });
+  if (!["draft", "correction_requested", "divergent", "stock_returned"].includes(order.status)) {
+    return res.status(409).json({ message: "Apenas rascunhos, ordens em correcao ou devolvidas pelo estoque podem ser editadas." });
   }
 
   const parsed = orderUpdateSchema.safeParse(normalizeOrderBody(req.body));
@@ -836,11 +886,16 @@ ordersRouter.put("/:id", requireRole("requester", "admin"), async (req, res) => 
 
   await replaceOrderItems(order.id, values.items);
 
+  const fromStockReturn = order.status === "stock_returned";
+
   await addOrderEvent({
     orderId: order.id,
     actorId: req.user.id,
     eventType: "Atualizada",
-    message: "Ordem atualizada."
+    message: fromStockReturn
+      ? "Operações optou por editar a ordem devolvida pelo estoque. Ordem retornou para rascunho."
+      : "Ordem atualizada.",
+    metadata: fromStockReturn ? { decision: "edit_order", previousStockResult: order.stock_result } : {}
   });
 
   return res.json(rows[0]);
@@ -861,8 +916,22 @@ ordersRouter.post("/:id/submit", requireRole("requester", "admin"), async (req, 
     return res.status(409).json({ message: "Ordem nao pode ser enviada neste status." });
   }
 
+  // Toda OS enviada (inclusive após correção do Suporte) passa pela conferência do Estoque
   const { rows } = await query(
-    "UPDATE service_orders SET status = 'pending_signature', updated_at = NOW() WHERE id = $1 RETURNING *",
+    `UPDATE service_orders
+     SET status = 'awaiting_stock_check', stock_result = NULL, stock_accessories_note = NULL,
+         stock_checker_id = NULL, stock_checked_at = NULL, updated_at = NOW()
+     WHERE id = $1 AND status::text IN ('draft', 'correction_requested', 'divergent')
+     RETURNING *`,
+    [order.id]
+  );
+
+  if (!rows[0]) {
+    return res.status(409).json({ message: "Ordem nao pode ser enviada neste status." });
+  }
+
+  await query(
+    "UPDATE order_items SET stock_checked_quantity = NULL, stock_note = NULL, stock_accessories = NULL WHERE service_order_id = $1",
     [order.id]
   );
 
@@ -870,10 +939,291 @@ ordersRouter.post("/:id/submit", requireRole("requester", "admin"), async (req, 
     orderId: order.id,
     actorId: req.user.id,
     eventType: "Enviada",
-    message: "Ordem enviada para todos os usuarios assinadores."
+    message: "Ordem enviada para conferência do estoque."
   });
 
   return res.json(rows[0]);
+});
+
+/**
+ * Muda o status de forma atômica: só atualiza se a OS ainda estiver no status esperado,
+ * evitando que duas ações simultâneas avancem a mesma ordem.
+ */
+async function transitionStatus(dbClient, orderId, fromStatus, toStatus, extraSet = "", extraParams = []) {
+  const { rows } = await dbClient.query(
+    `UPDATE service_orders
+     SET status = $1${extraSet ? `, ${extraSet}` : ""}, updated_at = NOW()
+     WHERE id = $2 AND status = $3
+     RETURNING *`,
+    [toStatus, orderId, fromStatus, ...extraParams]
+  );
+  return rows[0];
+}
+
+ordersRouter.post("/:id/stock/start", requireRole("stock"), async (req, res) => {
+  const order = await findOrder(req.params.id);
+
+  if (!order) {
+    return res.status(404).json({ message: "Ordem nao encontrada." });
+  }
+
+  if (order.status !== "awaiting_stock_check") {
+    return res.status(409).json({ message: "Apenas ordens aguardando conferência podem ter a conferência iniciada." });
+  }
+
+  const updated = await transitionStatus(
+    { query }, order.id, "awaiting_stock_check", "stock_checking", "stock_checker_id = $4", [req.user.id]
+  );
+
+  if (!updated) {
+    return res.status(409).json({ message: "A conferência desta ordem já foi iniciada." });
+  }
+
+  await addOrderEvent({
+    orderId: order.id,
+    actorId: req.user.id,
+    eventType: "Conferência iniciada",
+    message: "Estoque iniciou a conferência do material."
+  });
+
+  return res.json(updated);
+});
+
+ordersRouter.post("/:id/stock/check", requireRole("stock"), async (req, res) => {
+  const order = await findOrder(req.params.id);
+
+  if (!order) {
+    return res.status(404).json({ message: "Ordem nao encontrada." });
+  }
+
+  if (order.status !== "stock_checking") {
+    return res.status(409).json({ message: "Apenas ordens em conferência podem receber o resultado." });
+  }
+
+  const parsed = stockCheckSchema.safeParse(req.body ?? {});
+
+  if (!parsed.success) {
+    return res.status(400).json({ message: parsed.error.issues[0]?.message || "Dados da conferência inválidos." });
+  }
+
+  const { result, accessoriesNote } = parsed.data;
+  const { rows: orderItems } = await query(
+    `SELECT id, terminal_model, quantity FROM order_items
+     WHERE service_order_id = $1
+     ORDER BY item_index ASC, created_at ASC, id ASC`,
+    [order.id]
+  );
+
+  const checkedById = new Map(parsed.data.items.map((item) => [item.id, item]));
+  const coversAllItems =
+    checkedById.size === parsed.data.items.length &&
+    checkedById.size === orderItems.length &&
+    orderItems.every((item) => checkedById.has(item.id));
+
+  if (!coversAllItems) {
+    return res.status(400).json({ message: "Informe a conferência de cada linha de terminal da ordem, sem repetir itens." });
+  }
+
+  const lines = orderItems.map((item, index) => {
+    const checked = checkedById.get(item.id);
+    return {
+      id: item.id,
+      line: index + 1,
+      terminalModel: item.terminal_model,
+      requested: item.quantity,
+      checked: checked.checkedQuantity,
+      note: checked.note,
+      accessories: checked.accessories
+    };
+  });
+
+  const overLine = lines.find((line) => line.checked > line.requested);
+  if (overLine) {
+    return res.status(400).json({
+      message: `Item ${overLine.line}: a quantidade conferida (${overLine.checked}) não pode ser maior que a solicitada (${overLine.requested}).`
+    });
+  }
+
+  const missingLines = lines.filter((line) => line.checked < line.requested);
+
+  // "Completo" exige todas as linhas atendidas; havendo falta, a decisão cabe a Operações
+  if (result === "complete" && missingLines.length > 0) {
+    return res.status(409).json({
+      message: "Não é possível concluir como completo com itens em falta. Registre a conferência como parcial ou pendência de estoque para decisão de Operações."
+    });
+  }
+
+  if (result !== "complete" && missingLines.length === 0) {
+    return res.status(400).json({ message: "Todos os itens foram conferidos integralmente. Registre o resultado como completo." });
+  }
+
+  const nextStatus = result === "complete" ? "stock_picking" : "stock_returned";
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const updated = await transitionStatus(
+      client,
+      order.id,
+      "stock_checking",
+      nextStatus,
+      "stock_result = $4, stock_accessories_note = $5, stock_checker_id = $6, stock_checked_at = NOW()",
+      [result, accessoriesNote, req.user.id]
+    );
+
+    if (!updated) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ message: "A conferência desta ordem já foi registrada." });
+    }
+
+    for (const line of lines) {
+      await client.query(
+        "UPDATE order_items SET stock_checked_quantity = $1, stock_note = $2, stock_accessories = $3 WHERE id = $4",
+        [line.checked, line.note, line.accessories, line.id]
+      );
+    }
+
+    const missingSummary = missingLines.length
+      ? ` Itens em falta: ${missingLines.map((line) => `item ${line.line} (${line.terminalModel}) ${line.checked}/${line.requested}`).join("; ")}.`
+      : "";
+    const accompanyingSummary = ` Acompanham o terminal: ${lines
+      .map((line) => `item ${line.line}: ${line.accessories.map((key) => STOCK_ACCESSORY_LABELS[key]).join(", ") || "nenhum"}`)
+      .join("; ")}.`;
+
+    await client.query(
+      `INSERT INTO order_events (service_order_id, actor_id, event_type, message, metadata)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [
+        order.id,
+        req.user.id,
+        "Conferência registrada",
+        `Conferência do estoque: ${STOCK_RESULT_LABELS[result]}.${missingSummary}${accompanyingSummary}${accessoriesNote ? ` Acessórios: ${accessoriesNote}` : ""}`,
+        {
+          result,
+          accessoriesNote,
+          items: lines.map(({ id, line, requested, checked, note, accessories }) => ({ id, line, requested, checked, note, accessories }))
+        }
+      ]
+    );
+
+    await client.query("COMMIT");
+    return res.json(updated);
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+});
+
+ordersRouter.post("/:id/stock/release", requireRole("stock"), async (req, res) => {
+  const order = await findOrder(req.params.id);
+
+  if (!order) {
+    return res.status(404).json({ message: "Ordem nao encontrada." });
+  }
+
+  if (order.status !== "stock_picking") {
+    return res.status(409).json({ message: "Apenas ordens em separação podem ser liberadas ao Suporte." });
+  }
+
+  const updated = await transitionStatus({ query }, order.id, "stock_picking", "pending_signature");
+
+  if (!updated) {
+    return res.status(409).json({ message: "Esta ordem já foi liberada." });
+  }
+
+  await addOrderEvent({
+    orderId: order.id,
+    actorId: req.user.id,
+    eventType: "Separação concluída",
+    message: "Material separado pelo estoque. Ordem enviada para assinatura do Suporte."
+  });
+
+  return res.json(updated);
+});
+
+// Ações de Operações sobre OS devolvidas pelo Estoque por falta de material
+async function findReturnedOrder(req, res) {
+  const order = await findOrder(req.params.id);
+
+  if (!order) {
+    res.status(404).json({ message: "Ordem nao encontrada." });
+    return null;
+  }
+
+  if (req.user.role !== "admin" && order.requester_id !== req.user.id) {
+    res.status(403).json({ message: "Permissao insuficiente." });
+    return null;
+  }
+
+  if (order.status !== "stock_returned") {
+    res.status(409).json({ message: "Apenas ordens devolvidas pelo estoque aceitam esta ação." });
+    return null;
+  }
+
+  return order;
+}
+
+ordersRouter.post("/:id/stock-return/forward", requireRole("requester", "admin"), async (req, res) => {
+  const order = await findReturnedOrder(req, res);
+  if (!order) return;
+
+  const parsed = stockForwardSchema.safeParse(req.body ?? {});
+
+  if (!parsed.success) {
+    return res.status(400).json({ message: parsed.error.issues[0]?.message });
+  }
+
+  const updated = await transitionStatus({ query }, order.id, "stock_returned", "pending_signature");
+
+  if (!updated) {
+    return res.status(409).json({ message: "Esta ordem já recebeu uma decisão." });
+  }
+
+  await addOrderEvent({
+    orderId: order.id,
+    actorId: req.user.id,
+    eventType: "Encaminhada com falta de material",
+    message: `Operações encaminhou ao Suporte com conferência ${STOCK_RESULT_LABELS[order.stock_result] ?? "incompleta"}. Justificativa: ${parsed.data.justification}`,
+    metadata: { decision: "forward_to_support", stockResult: order.stock_result, justification: parsed.data.justification }
+  });
+
+  return res.json(updated);
+});
+
+ordersRouter.post("/:id/stock-return/recheck", requireRole("requester", "admin"), async (req, res) => {
+  const order = await findReturnedOrder(req, res);
+  if (!order) return;
+
+  const note = typeof req.body?.message === "string" ? req.body.message.trim() : "";
+  const updated = await transitionStatus(
+    { query },
+    order.id,
+    "stock_returned",
+    "awaiting_stock_check",
+    "stock_result = NULL, stock_accessories_note = NULL, stock_checker_id = NULL, stock_checked_at = NULL"
+  );
+
+  if (!updated) {
+    return res.status(409).json({ message: "Esta ordem já recebeu uma decisão." });
+  }
+
+  await query(
+    "UPDATE order_items SET stock_checked_quantity = NULL, stock_note = NULL, stock_accessories = NULL WHERE service_order_id = $1",
+    [order.id]
+  );
+
+  await addOrderEvent({
+    orderId: order.id,
+    actorId: req.user.id,
+    eventType: "Devolvida ao estoque",
+    message: `Operações devolveu a ordem para nova conferência do estoque.${note ? ` Observação: ${note}` : ""}`,
+    metadata: { decision: "return_to_stock", previousStockResult: order.stock_result }
+  });
+
+  return res.json(updated);
 });
 
 ordersRouter.post("/:id/request-correction", requireRole("signer"), async (req, res) => {

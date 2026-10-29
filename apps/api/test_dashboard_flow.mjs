@@ -23,6 +23,29 @@ async function login(email, password = "123456") {
   return res.data;
 }
 
+// Toda OS enviada passa pela conferência do Estoque antes de chegar ao Suporte
+async function passThroughStock(orderId, stockToken) {
+  const auth = { Authorization: `Bearer ${stockToken}` };
+  const startRes = await request(`/orders/${orderId}/stock/start`, { method: "POST", headers: auth });
+  assert.equal(startRes.status, 200, `Falha ao iniciar conferência: ${JSON.stringify(startRes.data)}`);
+
+  const detailRes = await request(`/orders/${orderId}`, { headers: auth });
+  const checkRes = await request(`/orders/${orderId}/stock/check`, {
+    method: "POST",
+    headers: auth,
+    body: JSON.stringify({
+      result: "complete",
+      items: detailRes.data.items.map((item) => ({ id: item.id, checkedQuantity: item.quantity }))
+    })
+  });
+  assert.equal(checkRes.status, 200, `Falha ao registrar conferência: ${JSON.stringify(checkRes.data)}`);
+
+  const releaseRes = await request(`/orders/${orderId}/stock/release`, { method: "POST", headers: auth });
+  assert.equal(releaseRes.status, 200, `Falha ao liberar ao Suporte: ${JSON.stringify(releaseRes.data)}`);
+  assert.equal(releaseRes.data.status, "pending_signature");
+  return releaseRes.data;
+}
+
 async function runDashboardTests() {
   console.log("================================================================================");
   console.log("TESTES OBRIGATÓRIOS DO DASHBOARD: SIMPLES, LIMPO E OBJETIVO");
@@ -34,6 +57,7 @@ async function runDashboardTests() {
   const signer1 = await login("assinante@empresa.com");
   const signer2 = await login("assinante2@empresa.com");
   const spectator = await login("espectador@empresa.com");
+  const stock = await login("estoque@empresa.com");
   const admin = await login("admin@empresa.com");
   console.log("✔ Autenticação realizada com sucesso para todos os perfis.\n");
 
@@ -161,6 +185,7 @@ async function runDashboardTests() {
     headers: { Authorization: `Bearer ${requester.token}` }
   });
   assert.equal(submitRes.status, 200, "Falha ao submeter ordem");
+  await passThroughStock(createdOrder.id, stock.token);
 
   const afterSubmitSigner = await request("/dashboard", {
     headers: { Authorization: `Bearer ${signer1.token}` }
@@ -217,6 +242,7 @@ async function runDashboardTests() {
     method: "POST",
     headers: { Authorization: `Bearer ${requester.token}` }
   });
+  await passThroughStock(createdOrder.id, stock.token);
 
   // 5.5 Provocar divergência no double check
   const beforeDivergent = await request("/dashboard", {
@@ -284,7 +310,7 @@ async function runDashboardTests() {
       items: [{ itemName: "A", itemIdentifier: modelName, partNumber, clientName: "B", quantity: 1, configuration: "Config" }]
     })
   });
-  assert.equal(spectatorCreate.status, 403, "Estoque (espectador) NÃO deve conseguir criar ordens (403)");
+  assert.equal(spectatorCreate.status, 403, "Espectador NÃO deve conseguir criar ordens (403)");
 
   // Solicitante não pode assinar ordens
   const requesterSign = await request(`/orders/${createdOrder.id}/sign`, {

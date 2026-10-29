@@ -23,6 +23,29 @@ async function login(email, password = "123456") {
   return res.data.token;
 }
 
+// Toda OS enviada passa pela conferência do Estoque antes de chegar ao Suporte
+async function passThroughStock(orderId, stockToken) {
+  const auth = { Authorization: `Bearer ${stockToken}` };
+  const startRes = await request(`/orders/${orderId}/stock/start`, { method: "POST", headers: auth });
+  assert.equal(startRes.status, 200, `Falha ao iniciar conferência: ${JSON.stringify(startRes.data)}`);
+
+  const detailRes = await request(`/orders/${orderId}`, { headers: auth });
+  const checkRes = await request(`/orders/${orderId}/stock/check`, {
+    method: "POST",
+    headers: auth,
+    body: JSON.stringify({
+      result: "complete",
+      items: detailRes.data.items.map((item) => ({ id: item.id, checkedQuantity: item.quantity }))
+    })
+  });
+  assert.equal(checkRes.status, 200, `Falha ao registrar conferência: ${JSON.stringify(checkRes.data)}`);
+
+  const releaseRes = await request(`/orders/${orderId}/stock/release`, { method: "POST", headers: auth });
+  assert.equal(releaseRes.status, 200, `Falha ao liberar ao Suporte: ${JSON.stringify(releaseRes.data)}`);
+  assert.equal(releaseRes.data.status, "pending_signature");
+  return releaseRes.data;
+}
+
 async function runTests() {
   console.log("================================================================================");
   console.log("INICIANDO BATERIA DE TESTES OBRIGATÓRIOS: SEPARAÇÃO DE ORDENS POR EQUIPE EXECUTORA");
@@ -34,6 +57,7 @@ async function runTests() {
   const signer1Token = await login("assinante@empresa.com");
   const signer2Token = await login("assinante2@empresa.com");
   const spectatorToken = await login("espectador@empresa.com");
+  const stockToken = await login("estoque@empresa.com");
   const adminToken = await login("admin@empresa.com");
   console.log("✔ Todos os tokens obtidos com sucesso.\n");
 
@@ -166,7 +190,8 @@ async function runTests() {
     headers: { Authorization: `Bearer ${requesterToken}` }
   });
   assert.equal(submitSuporteRes.status, 200);
-  assert.equal(submitSuporteRes.data.status, "pending_signature");
+  assert.equal(submitSuporteRes.data.status, "awaiting_stock_check", "OS de Suporte deve passar primeiro pelo Estoque");
+  await passThroughStock(suporteOrder.id, stockToken);
   assert.equal(submitSuporteRes.data.destination_role, "signer");
 
   // Enviar OS Produção
@@ -175,7 +200,8 @@ async function runTests() {
     headers: { Authorization: `Bearer ${requesterToken}` }
   });
   assert.equal(submitProducaoRes.status, 200);
-  assert.equal(submitProducaoRes.data.status, "pending_signature");
+  assert.equal(submitProducaoRes.data.status, "awaiting_stock_check", "OS de Produção deve passar primeiro pelo Estoque");
+  await passThroughStock(producaoOrder.id, stockToken);
   assert.equal(submitProducaoRes.data.destination_role, "signer");
 
   // Consultar como Suporte (signer) e verificar se ambas constam como pendentes de validação
@@ -248,7 +274,8 @@ async function runTests() {
     headers: { Authorization: `Bearer ${requesterToken}` }
   });
   assert.equal(resubmitRes.status, 200);
-  assert.equal(resubmitRes.data.status, "pending_signature");
+  assert.equal(resubmitRes.data.status, "awaiting_stock_check", "OS corrigida deve voltar a passar pelo Estoque");
+  await passThroughStock(producaoOrder.id, stockToken);
   console.log("  ✔ OS corrigida e reenviada ao Suporte.");
 
   // 7.3 Primeira assinatura na OS Produção pelo primeiro validador do Suporte

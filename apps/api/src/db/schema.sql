@@ -267,3 +267,32 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_signature_occurrences_active_order
   ON signature_occurrences(service_order_id)
   WHERE status <> 'resolved';
 
+
+-- Perfil Estoque: conferência de material antes da assinatura do Suporte.
+-- Os novos valores de enum não são usados neste script, pois só ficam disponíveis após o commit.
+ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'stock';
+ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'awaiting_stock_check';
+ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'stock_checking';
+ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'stock_picking';
+ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'stock_returned';
+
+ALTER TABLE service_orders ADD COLUMN IF NOT EXISTS stock_result TEXT;
+ALTER TABLE service_orders ADD COLUMN IF NOT EXISTS stock_accessories_note TEXT;
+ALTER TABLE service_orders ADD COLUMN IF NOT EXISTS stock_checker_id UUID REFERENCES users(id);
+ALTER TABLE service_orders ADD COLUMN IF NOT EXISTS stock_checked_at TIMESTAMPTZ;
+
+DO $$ BEGIN
+  ALTER TABLE service_orders ADD CONSTRAINT service_orders_stock_result_check
+    CHECK (stock_result IS NULL OR stock_result IN ('complete', 'partial', 'shortage'));
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS stock_checked_quantity INTEGER;
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS stock_note TEXT;
+
+DO $$ BEGIN
+  ALTER TABLE order_items ADD CONSTRAINT order_items_stock_checked_quantity_check
+    CHECK (stock_checked_quantity IS NULL OR stock_checked_quantity >= 0);
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+-- Acessórios que o Estoque confirmou que acompanham cada linha de terminal
+ALTER TABLE order_items ADD COLUMN IF NOT EXISTS stock_accessories TEXT[];

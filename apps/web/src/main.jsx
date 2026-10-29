@@ -44,7 +44,11 @@ const statusLabels = {
   correction_requested: "Aguardando correção",
   divergent: "Divergente",
   signed: "Aprovada",
-  cancelled: "Cancelada"
+  cancelled: "Cancelada",
+  awaiting_stock_check: "Aguardando conferência",
+  stock_checking: "Em conferência",
+  stock_picking: "Em separação",
+  stock_returned: "Retorno do estoque"
 };
 
 const statusIcons = {
@@ -53,8 +57,35 @@ const statusIcons = {
   correction_requested: RefreshCw,
   divergent: AlertTriangle,
   signed: CheckCircle2,
-  cancelled: XCircle
+  cancelled: XCircle,
+  awaiting_stock_check: Inbox,
+  stock_checking: ClipboardList,
+  stock_picking: Activity,
+  stock_returned: AlertTriangle
 };
+
+const STOCK_STATUSES = ["awaiting_stock_check", "stock_checking", "stock_picking", "stock_returned"];
+
+// Acessórios que o Estoque marca como enviados junto do terminal; requestedBy indica o que a OS pediu
+const stockAccessoryOptions = [
+  { key: "battery", label: "Bateria", requestedBy: (item) => item.battery === "SIM" },
+  { key: "charger", label: "Carregador", requestedBy: (item) => item.charger === "SIM" },
+  { key: "manual", label: "Manual", requestedBy: (item) => item.manual === "SIM" },
+  { key: "minbase", label: "Minbase", requestedBy: (item) => item.minbase === "SIM" },
+  { key: "label", label: "Label", requestedBy: (item) => item.label === "SIM" },
+  { key: "aesthetic_cover", label: "Cobre estético", requestedBy: (item) => item.aesthetic_cover === "SIM" },
+  { key: "packaging", label: "Embalagem", requestedBy: (item) => Boolean(item.packaging) }
+];
+
+function stockAccessoryLabel(key) {
+  return stockAccessoryOptions.find((option) => option.key === key)?.label ?? key;
+}
+
+const stockResultOptions = [
+  { value: "complete", label: "Completo" },
+  { value: "partial", label: "Parcial" },
+  { value: "shortage", label: "Pendência de estoque" }
+];
 
 const orderTypeOptions = [
   { value: "Reparo", label: "Reparo" },
@@ -71,6 +102,7 @@ const defaultCatalog = {
 const roleOptions = [
   { value: "requester", label: "Operações" },
   { value: "signer", label: "Suporte" },
+  { value: "stock", label: "Estoque" },
   { value: "spectator", label: "Espectador" },
   { value: "admin", label: "Admin" }
 ];
@@ -321,7 +353,10 @@ function App() {
           pending_signature: "pendente_validacao",
           correction_requested: "recertificar",
           signed: "signed",
-          divergent: "divergent"
+          divergent: "divergent",
+          awaiting_stock_check: "estoque",
+          stock_picking: "em_separacao",
+          stock_returned: "retorno_estoque"
         }[statusKey] || "todas";
         setUserStatusFilter(mappedFilter);
         setUserMenu("orders");
@@ -868,7 +903,9 @@ function App() {
                     ? "Auditoria e gestão de ordens com tentativas incorretas de assinatura."
                     : (session.user.role === "requester"
                       ? (userMenu === "create" ? "Crie e acompanhe suas ordens de serviço." : "Consulte suas ordens criadas e acompanhe seus status.")
-                      : "A aprovação exige duas assinaturas registradas."))}
+                      : session.user.role === "stock"
+                        ? "Confira o material de cada ordem antes do envio ao Suporte."
+                        : "A aprovação exige duas assinaturas registradas."))}
             </p>
           </div>
           <div className="topbar-actions">
@@ -928,6 +965,7 @@ function App() {
               onSignOrder={(keyCount) => runOrderAction(`/orders/${selected.id}/sign`, { keyCount: Number(keyCount) })}
               onCorrection={(msg) => runOrderAction(`/orders/${selected.id}/request-correction`, { message: msg })}
               onIncorrectSignature={() => runOrderAction(`/orders/${selected.id}/incorrect-signature`)}
+              onOrderAction={(action, body) => runOrderAction(`/orders/${selected.id}/${action}`, body)}
               onEditOrder={startEdit}
               onClearAllOrders={clearAllOrders}
               session={session}
@@ -1017,6 +1055,7 @@ function App() {
             onSign={(keyCount) => runOrderAction(`/orders/${selected.id}/sign`, { keyCount: Number(keyCount) })}
             onCorrection={(msg) => runOrderAction(`/orders/${selected.id}/request-correction`, { message: msg })}
             onIncorrectSignature={() => runOrderAction(`/orders/${selected.id}/incorrect-signature`)}
+            onOrderAction={(action, body) => runOrderAction(`/orders/${selected.id}/${action}`, body)}
             onEdit={startEdit}
             executorTab={executorTab}
             onExecutorTabChange={handleExecutorTabChange}
@@ -1548,15 +1587,20 @@ function DashboardPanel({ session, api, onNavigateOrders }) {
     awaitingValidation: 0,
     awaitingCorrection: 0,
     approved: 0,
-    divergent: 0
+    divergent: 0,
+    awaitingStockCheck: 0,
+    stockPicking: 0,
+    stockReturned: 0
   };
 
   const roleLabel = {
     admin: "Administrador",
-    requester: "Solicitante",
+    requester: "Operações",
     signer: "Suporte",
-    spectator: "Estoque"
+    spectator: "Espectador",
+    stock: "Estoque"
   }[userRole] || "Usuário";
+  const showStockMetrics = ["admin", "requester", "stock"].includes(userRole);
 
   return (
     <div className="dashboard-panel">
@@ -1630,6 +1674,31 @@ function DashboardPanel({ session, api, onNavigateOrders }) {
             variant="danger"
             onClick={() => onNavigateOrders && onNavigateOrders("divergent")}
           />
+          {showStockMetrics && (
+            <>
+              <DashboardMetricCard
+                title="Aguardando conferência"
+                value={metrics.awaitingStockCheck}
+                icon={<Inbox size={18} />}
+                variant="info"
+                onClick={() => onNavigateOrders && onNavigateOrders("awaiting_stock_check")}
+              />
+              <DashboardMetricCard
+                title="Em separação"
+                value={metrics.stockPicking}
+                icon={<Activity size={18} />}
+                variant="primary"
+                onClick={() => onNavigateOrders && onNavigateOrders("stock_picking")}
+              />
+              <DashboardMetricCard
+                title="Retorno do estoque"
+                value={metrics.stockReturned}
+                icon={<AlertTriangle size={18} />}
+                variant="warning"
+                onClick={() => onNavigateOrders && onNavigateOrders("stock_returned")}
+              />
+            </>
+          )}
         </div>
       </section>
 
@@ -2211,6 +2280,7 @@ function UserOrdersPanel({
   onSign,
   onCorrection,
   onIncorrectSignature,
+  onOrderAction,
   onEdit,
   executorTab = "suporte",
   onExecutorTabChange,
@@ -2253,9 +2323,17 @@ function UserOrdersPanel({
   );
 
   const isRequester = session?.user?.role === "requester";
+  const seesStockFlow = ["requester", "stock", "spectator"].includes(session?.user?.role);
   const filterOptions = [
     { value: "todas", label: "TODAS" },
     ...(isRequester ? [{ value: "draft", label: "RASCUNHOS" }] : []),
+    ...(seesStockFlow
+      ? [
+        { value: "estoque", label: "CONFERÊNCIA ESTOQUE" },
+        { value: "em_separacao", label: "EM SEPARAÇÃO" },
+        { value: "retorno_estoque", label: "RETORNO DO ESTOQUE" }
+      ]
+      : []),
     { value: "pendente_validacao", label: "PENDENTE VALIDAÇÃO" },
     { value: "aguardando_1", label: "AGUARDANDO 1 ASSINATURA" },
     { value: "signed", label: "ASSINADAS" },
@@ -2365,6 +2443,7 @@ function UserOrdersPanel({
         onSign={onSign}
         onCorrection={onCorrection}
         onIncorrectSignature={onIncorrectSignature}
+        onOrderAction={onOrderAction}
         onEdit={onEdit}
       />
     </div>
@@ -2397,6 +2476,7 @@ function AdminConsole({
   onSignOrder,
   onCorrection,
   onIncorrectSignature,
+  onOrderAction,
   onEditOrder,
   onClearAllOrders,
   session,
@@ -2462,6 +2542,7 @@ function AdminConsole({
             onSign={onSignOrder}
             onCorrection={onCorrection}
             onIncorrectSignature={onIncorrectSignature}
+            onOrderAction={onOrderAction}
             onEdit={onEditOrder}
             allowEdit={false}
           />
@@ -2525,14 +2606,19 @@ function AdminOrdersPanel({
       }
       return acc;
     },
-    { total: 0, draft: 0, pending_signature: 0, correction_requested: 0, divergent: 0, signed: 0, cancelled: 0 }
+    {
+      total: 0, draft: 0, pending_signature: 0, correction_requested: 0, divergent: 0, signed: 0, cancelled: 0,
+      awaiting_stock_check: 0, stock_checking: 0, stock_picking: 0, stock_returned: 0
+    }
   );
 
   const statusFilteredOrders = statusFilter === "total"
     ? periodFilteredOrders
     : statusFilter === "divergent"
       ? periodFilteredOrders.filter((order) => order.status === "divergent" || Number(order.incorrect_signatures) > 0)
-      : periodFilteredOrders.filter((order) => order.status === statusFilter);
+      : statusFilter === "awaiting_stock_check"
+        ? periodFilteredOrders.filter((order) => ["awaiting_stock_check", "stock_checking"].includes(order.status))
+        : periodFilteredOrders.filter((order) => order.status === statusFilter);
 
   const filteredOrders = normalizedSearch
     ? statusFilteredOrders.filter((order) => orderMatchesSearch(order, normalizedSearch))
@@ -2603,6 +2689,15 @@ function AdminOrdersPanel({
         </button>
         <button className={statusFilter === "draft" ? "active" : ""} onClick={() => setStatusFilter("draft")}>
           <strong>{countsByStatus.draft}</strong><span>Rascunhos</span>
+        </button>
+        <button className={statusFilter === "awaiting_stock_check" ? "active" : ""} onClick={() => setStatusFilter("awaiting_stock_check")}>
+          <strong>{countsByStatus.awaiting_stock_check + countsByStatus.stock_checking}</strong><span>Conferência estoque</span>
+        </button>
+        <button className={statusFilter === "stock_picking" ? "active" : ""} onClick={() => setStatusFilter("stock_picking")}>
+          <strong>{countsByStatus.stock_picking}</strong><span>Em separação</span>
+        </button>
+        <button className={statusFilter === "stock_returned" ? "active" : ""} onClick={() => setStatusFilter("stock_returned")}>
+          <strong>{countsByStatus.stock_returned}</strong><span>Retorno do estoque</span>
         </button>
         <button className={statusFilter === "pending_signature" ? "active" : ""} onClick={() => setStatusFilter("pending_signature")}>
           <strong>{countsByStatus.pending_signature}</strong><span>Pendente Validação</span>
@@ -2853,6 +2948,257 @@ function CatalogCard({ title, value, placeholder, items, onChange, onSubmit }) {
   );
 }
 
+function StockCheckPanel({ order, items, onAction }) {
+  const [quantities, setQuantities] = useState(() =>
+    Object.fromEntries(items.map((item) => [item.id, String(item.stock_checked_quantity ?? item.quantity)]))
+  );
+  const [notes, setNotes] = useState(() => Object.fromEntries(items.map((item) => [item.id, item.stock_note ?? ""])));
+  const [accessoriesNote, setAccessoriesNote] = useState(order.stock_accessories_note ?? "");
+  const [accessories, setAccessories] = useState(() =>
+    Object.fromEntries(items.map((item) => [
+      item.id,
+      item.stock_accessories ?? stockAccessoryOptions.filter((option) => option.requestedBy(item)).map((option) => option.key)
+    ]))
+  );
+
+  function toggleAccessory(itemId, key) {
+    setAccessories((current) => {
+      const list = current[itemId] ?? [];
+      return { ...current, [itemId]: list.includes(key) ? list.filter((k) => k !== key) : [...list, key] };
+    });
+  }
+  const [result, setResult] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const hasShortage = items.some((item) => Number(quantities[item.id] || 0) < Number(item.quantity));
+  const hasInvalid = items.some((item) => quantities[item.id] === "" || Number(quantities[item.id]) > Number(item.quantity));
+  // Mesma regra do backend: completo só sem falta; parcial/pendência só com falta
+  const resultAllowed = result === "complete" ? !hasShortage : Boolean(result) && hasShortage;
+
+  async function run(action, body) {
+    setBusy(true);
+    try {
+      await onAction(action, body);
+    } catch {
+      // A mensagem de erro já é exibida pelo runOrderAction
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (order.status === "awaiting_stock_check") {
+    return (
+      <section className="validation-decision-panel">
+        <h4>Conferência do estoque</h4>
+        <p className="muted">Inicie a conferência para registrar a quantidade disponível de cada linha de terminal.</p>
+        <button className="primary" type="button" disabled={busy} onClick={() => run("stock/start")}>
+          <ClipboardList size={18} />
+          Iniciar conferência
+        </button>
+      </section>
+    );
+  }
+
+  if (order.status === "stock_picking") {
+    return (
+      <section className="validation-decision-panel">
+        <h4>Separação do material</h4>
+        <p className="muted">Conferência completa. Após separar o material, libere a ordem para assinatura do Suporte.</p>
+        <button className="success" type="button" disabled={busy} onClick={() => run("stock/release")}>
+          <Send size={18} />
+          Concluir separação e enviar ao Suporte
+        </button>
+      </section>
+    );
+  }
+
+  return (
+    <section className="validation-decision-panel">
+      <h4>Conferência por linha de terminal</h4>
+      <div className="stock-check-lines">
+        {items.map((item, index) => (
+          <div className="stock-check-line" key={item.id}>
+            <div>
+              <strong>Item {index + 1}: {item.terminal_model}</strong>
+              <small className="muted"> {item.part_number} | {item.client_name} | solicitado {item.quantity}</small>
+            </div>
+            <label>
+              Conferido
+              <input
+                type="text"
+                inputMode="numeric"
+                className="numeric-input"
+                value={quantities[item.id]}
+                onChange={(event) => {
+                  const cleaned = event.target.value.replace(/\D/g, "");
+                  setQuantities((current) => ({ ...current, [item.id]: cleaned }));
+                }}
+              />
+            </label>
+            <label>
+              Observação
+              <input
+                value={notes[item.id]}
+                placeholder="Opcional"
+                onChange={(event) => setNotes((current) => ({ ...current, [item.id]: event.target.value }))}
+              />
+            </label>
+          </div>
+        ))}
+      </div>
+
+      <label>
+        Observação de acessórios
+        <textarea
+          placeholder="Carregadores, baterias, manuais, embalagens..."
+          value={accessoriesNote}
+          onChange={(event) => setAccessoriesNote(event.target.value)}
+        />
+      </label>
+
+      <div className="decision-options stock-result-options">
+        {stockResultOptions.map((option) => (
+          <label key={option.value} className={`decision-label ${result === option.value ? "active" : ""}`}>
+            <input
+              type="radio"
+              name={`stock-result-${order.id}`}
+              value={option.value}
+              checked={result === option.value}
+              onChange={() => setResult(option.value)}
+            />
+            <span>{option.label}</span>
+          </label>
+        ))}
+      </div>
+
+      {hasInvalid && <p className="inline-note">A quantidade conferida deve ser informada e não pode passar da solicitada.</p>}
+      {result === "complete" && hasShortage && (
+        <p className="inline-note">Há itens em falta. Registre como parcial ou pendência de estoque para decisão de Operações.</p>
+      )}
+      {result && result !== "complete" && !hasShortage && (
+        <p className="inline-note">Todos os itens estão completos. Registre o resultado como completo.</p>
+      )}
+
+      <div className="stock-accessories-section">
+        <h4>Itens que acompanham o terminal</h4>
+        <p className="muted">Marque o que está sendo enviado junto. Os itens com * foram pedidos na OS.</p>
+        {items.map((item, index) => (
+          <div className="stock-accessories-line" key={item.id}>
+            <strong>Item {index + 1}: {item.terminal_model}</strong>
+            <div className="stock-accessories-options">
+              {stockAccessoryOptions.map((option) => {
+                const checked = (accessories[item.id] ?? []).includes(option.key);
+                const requested = option.requestedBy(item);
+                return (
+                  <label
+                    key={option.key}
+                    className={`stock-accessory-chip ${checked ? "checked" : ""} ${requested && !checked ? "missing" : ""}`}
+                  >
+                    <input type="checkbox" checked={checked} onChange={() => toggleAccessory(item.id, option.key)} />
+                    <span>{option.label}{requested ? " *" : ""}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <button
+        className="primary"
+        type="button"
+        disabled={busy || hasInvalid || !resultAllowed}
+        onClick={() => run("stock/check", {
+          result,
+          accessoriesNote,
+          items: items.map((item) => ({
+            id: item.id,
+            checkedQuantity: Number(quantities[item.id]),
+            note: notes[item.id],
+            accessories: accessories[item.id] ?? []
+          }))
+        })}
+      >
+        <CheckCircle2 size={18} />
+        Registrar conferência
+      </button>
+    </section>
+  );
+}
+
+function StockReturnDecisionPanel({ onAction, onEdit }) {
+  const [decision, setDecision] = useState(null);
+  const [justification, setJustification] = useState("");
+  const [recheckNote, setRecheckNote] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function run(action, body) {
+    setBusy(true);
+    try {
+      await onAction(action, body);
+    } catch {
+      // A mensagem de erro já é exibida pelo runOrderAction
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="validation-decision-panel">
+      <h4>Falta de material: o que deseja fazer?</h4>
+      <div className="stock-decision-buttons">
+        <button type="button" className={decision === "forward" ? "primary" : "ghost"} onClick={() => setDecision("forward")}>
+          <Send size={16} />
+          Encaminhar ao Suporte
+        </button>
+        <button type="button" className={decision === "recheck" ? "primary" : "ghost"} onClick={() => setDecision("recheck")}>
+          <RefreshCw size={16} />
+          Devolver ao Estoque
+        </button>
+        <button type="button" className="ghost" onClick={onEdit}>
+          <Edit3 size={16} />
+          Editar OS
+        </button>
+      </div>
+
+      {decision === "forward" && (
+        <div className="decision-step-yes">
+          <label>
+            Justificativa (obrigatória, fica registrada no histórico)
+            <textarea
+              placeholder="Explique por que a ordem segue para o Suporte mesmo com falta de material..."
+              value={justification}
+              onChange={(event) => setJustification(event.target.value)}
+            />
+          </label>
+          <button
+            className="primary"
+            type="button"
+            disabled={busy || justification.trim().length < 5}
+            onClick={() => run("stock-return/forward", { justification })}
+          >
+            <Send size={18} />
+            Confirmar encaminhamento
+          </button>
+        </div>
+      )}
+
+      {decision === "recheck" && (
+        <div className="decision-step-no">
+          <label>
+            Observação para o estoque (opcional)
+            <textarea value={recheckNote} onChange={(event) => setRecheckNote(event.target.value)} />
+          </label>
+          <button className="primary" type="button" disabled={busy} onClick={() => run("stock-return/recheck", { message: recheckNote })}>
+            <RefreshCw size={18} />
+            Devolver para nova conferência
+          </button>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function OrderDetails({
   session,
   selected,
@@ -2864,6 +3210,7 @@ function OrderDetails({
   onSign,
   onCorrection,
   onIncorrectSignature,
+  onOrderAction,
   onEdit,
   allowEdit = true
 }) {
@@ -2903,8 +3250,13 @@ function OrderDetails({
   const isRecipient = selected.destination_role === session.user.role;
   const hasCurrentUserSigned = signedUserIds.includes(session.user.id);
   const isSpectator = session.user.role === "spectator";
-  const canEdit = allowEdit && ["admin", "requester"].includes(session.user.role) && ["draft", "correction_requested"].includes(selected.status);
-  const canSubmit = canEdit;
+  const isOwnerOrAdmin = session.user.role === "admin" || (session.user.role === "requester" && selected.requester_id === session.user.id);
+  const canEdit = allowEdit && ["admin", "requester"].includes(session.user.role) && ["draft", "correction_requested", "stock_returned"].includes(selected.status);
+  const canSubmit = canEdit && selected.status !== "stock_returned";
+  const isStockUser = session.user.role === "stock";
+  const canStockAct = isStockUser && ["awaiting_stock_check", "stock_checking", "stock_picking"].includes(selected.status);
+  const canDecideStockReturn = isOwnerOrAdmin && selected.status === "stock_returned" && Boolean(onOrderAction);
+  const hasStockCheck = items.some((item) => item.stock_checked_quantity != null);
   const canReview = selected.status === "pending_signature" && !hasCurrentUserSigned && isRecipient;
 
   const divergenceInfo = selected.divergence ?? (
@@ -3072,9 +3424,24 @@ function OrderDetails({
                 <span>{item.part_number}</span>
                 <span>{item.client_name}</span>
                 <span>{item.item_name || "—"}</span>
-                <span>{item.quantity}</span>
+                <span>
+                  {item.quantity}
+                  {item.stock_checked_quantity != null && (
+                    <small className={`stock-checked-qty ${item.stock_checked_quantity < item.quantity ? "short" : "ok"}`}>
+                      {" "}conferido {item.stock_checked_quantity}
+                    </small>
+                  )}
+                </span>
                 {!isSpectator && <span>{item.configuration}</span>}
               </div>
+              {item.stock_accessories && (
+                <p className="stock-item-note">
+                  Acompanha o terminal: {item.stock_accessories.length
+                    ? item.stock_accessories.map(stockAccessoryLabel).join(", ")
+                    : "nenhum acessório"}
+                </p>
+              )}
+              {item.stock_note && <p className="stock-item-note">Estoque: {item.stock_note}</p>}
               {(item.packaging || item.battery || item.terminal_opening || item.manual || item.charger || item.minbase || item.label || item.aesthetic_cover) && (
                 <div className="item-detail-options-chips">
                   <span className="item-opt-chip"><strong>Embalagem:</strong> {item.packaging || "—"}</span>
@@ -3100,6 +3467,21 @@ function OrderDetails({
           </button>
         )}
       </div>
+
+      {hasStockCheck && selected.stock_result && (
+        <p className="inline-note">
+          Conferência do estoque: <strong>{stockResultOptions.find((o) => o.value === selected.stock_result)?.label ?? selected.stock_result}</strong>
+          {selected.stock_accessories_note ? ` | Acessórios: ${selected.stock_accessories_note}` : ""}
+        </p>
+      )}
+
+      {canStockAct && (
+        <StockCheckPanel key={`${selected.id}-${selected.status}`} order={selected} items={items} onAction={onOrderAction} />
+      )}
+
+      {canDecideStockReturn && (
+        <StockReturnDecisionPanel key={selected.id} onAction={onOrderAction} onEdit={() => onEdit(selected)} />
+      )}
 
       {selected.status === "pending_signature" && hasCurrentUserSigned && (
         <p className="inline-note">Sua assinatura ja foi registrada. A ordem ainda aguarda a outra assinatura.</p>
@@ -3405,6 +3787,18 @@ function orderValidationHint(order) {
     return "Aguardando correcao";
   }
 
+  if (order.status === "awaiting_stock_check" || order.status === "stock_checking") {
+    return "Conferência do estoque";
+  }
+
+  if (order.status === "stock_picking") {
+    return "Separação do material";
+  }
+
+  if (order.status === "stock_returned") {
+    return "Decisão de Operações sobre falta de material";
+  }
+
   if (order.status === "divergent") {
     return "Divergência apontada";
   }
@@ -3531,6 +3925,18 @@ function userOrderMatchesFilter(order, filter) {
 
   if (filter === "divergent") {
     return order.status === "divergent" || Number(order.incorrect_signatures ?? 0) > 0;
+  }
+
+  if (filter === "estoque") {
+    return ["awaiting_stock_check", "stock_checking"].includes(order.status);
+  }
+
+  if (filter === "em_separacao") {
+    return order.status === "stock_picking";
+  }
+
+  if (filter === "retorno_estoque") {
+    return order.status === "stock_returned";
   }
 
   return true;

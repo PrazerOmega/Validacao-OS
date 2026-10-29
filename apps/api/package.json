@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
-    "test": "node test_executor_flow.mjs && node test_dashboard_flow.mjs && node test_audit_fixes.mjs && node test_dashboard_occurrences_flow.mjs && node test_item_mandatory_options.mjs",
+    "test": "node test_executor_flow.mjs && node test_dashboard_flow.mjs && node test_audit_fixes.mjs && node test_dashboard_occurrences_flow.mjs && node test_item_mandatory_options.mjs && node test_stock_flow.mjs",
     "db:setup": "node src/db/setup.js"
   },
   "dependencies": {

@@ -1537,6 +1537,32 @@ function DashboardMetricCard({ title, value, icon, variant = "neutral", onClick 
   );
 }
 
+function DashboardSectorGroup({ title, icon, metrics, onNavigateOrders }) {
+  const subtotal = metrics.reduce((sum, metric) => sum + (metric.value ?? 0), 0);
+  return (
+    <div className="dashboard-sector-group">
+      <div className="dashboard-sector-header">
+        <span className="dashboard-sector-title">
+          {icon}
+          {title}
+        </span>
+        <span className="dashboard-sector-count" title="Ordens em andamento neste setor">{subtotal}</span>
+      </div>
+      <div className="dashboard-sector-cards">
+        {metrics.map((metric) => (
+          <DashboardMetricCard
+            key={metric.statusKey}
+            title={metric.title}
+            value={metric.value}
+            icon={metric.icon}
+            variant={metric.variant}
+            onClick={() => onNavigateOrders && onNavigateOrders(metric.statusKey)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function DashboardPanel({ session, api, onNavigateOrders }) {
   const [loading, setLoading] = useState(true);
@@ -1636,9 +1662,9 @@ function DashboardPanel({ session, api, onNavigateOrders }) {
         </div>
       )}
 
-      {/* Grid com os 5 cards simples e objetivos */}
+      {/* Visão geral: total e ordens concluídas */}
       <section className="dashboard-metrics-section">
-        <div className="dashboard-metrics-grid">
+        <div className="dashboard-metrics-grid dashboard-overview-grid">
           <DashboardMetricCard
             title="Total de OS"
             value={metrics.totalOrders}
@@ -1647,59 +1673,46 @@ function DashboardPanel({ session, api, onNavigateOrders }) {
             onClick={() => onNavigateOrders && onNavigateOrders("total")}
           />
           <DashboardMetricCard
-            title="Aguardando validação"
-            value={metrics.awaitingValidation}
-            icon={<Clock3 size={18} />}
-            variant="warning"
-            onClick={() => onNavigateOrders && onNavigateOrders("pending_signature")}
-          />
-          <DashboardMetricCard
-            title="Aguardando correção"
-            value={metrics.awaitingCorrection}
-            icon={<RefreshCw size={18} />}
-            variant="info"
-            onClick={() => onNavigateOrders && onNavigateOrders("correction_requested")}
-          />
-          <DashboardMetricCard
             title="Aprovadas"
             value={metrics.approved}
             icon={<CheckCircle2 size={18} />}
             variant="success"
             onClick={() => onNavigateOrders && onNavigateOrders("signed")}
           />
-          <DashboardMetricCard
-            title="Divergências"
-            value={metrics.divergent}
-            icon={<AlertTriangle size={18} />}
-            variant="danger"
-            onClick={() => onNavigateOrders && onNavigateOrders("divergent")}
-          />
-          {showStockMetrics && (
-            <>
-              <DashboardMetricCard
-                title="Aguardando conferência"
-                value={metrics.awaitingStockCheck}
-                icon={<Inbox size={18} />}
-                variant="info"
-                onClick={() => onNavigateOrders && onNavigateOrders("awaiting_stock_check")}
-              />
-              <DashboardMetricCard
-                title="Em separação"
-                value={metrics.stockPicking}
-                icon={<Activity size={18} />}
-                variant="primary"
-                onClick={() => onNavigateOrders && onNavigateOrders("stock_picking")}
-              />
-              <DashboardMetricCard
-                title="Retorno do estoque"
-                value={metrics.stockReturned}
-                icon={<AlertTriangle size={18} />}
-                variant="warning"
-                onClick={() => onNavigateOrders && onNavigateOrders("stock_returned")}
-              />
-            </>
-          )}
         </div>
+      </section>
+
+      {/* Estado das ordens separado pelo setor responsável pela próxima ação */}
+      <section className="dashboard-sectors">
+        <DashboardSectorGroup
+          title="Operações"
+          icon={<Edit3 size={15} />}
+          metrics={[
+            { title: "Aguardando correção", value: metrics.awaitingCorrection, icon: <RefreshCw size={18} />, variant: "info", statusKey: "correction_requested" },
+            { title: "Divergências", value: metrics.divergent, icon: <AlertTriangle size={18} />, variant: "danger", statusKey: "divergent" }
+          ]}
+          onNavigateOrders={onNavigateOrders}
+        />
+        {showStockMetrics && (
+          <DashboardSectorGroup
+            title="Estoque"
+            icon={<Inbox size={15} />}
+            metrics={[
+              { title: "Aguardando conferência", value: metrics.awaitingStockCheck, icon: <Inbox size={18} />, variant: "info", statusKey: "awaiting_stock_check" },
+              { title: "Em separação", value: metrics.stockPicking, icon: <Activity size={18} />, variant: "primary", statusKey: "stock_picking" },
+              { title: "Retorno do estoque", value: metrics.stockReturned, icon: <AlertTriangle size={18} />, variant: "warning", statusKey: "stock_returned" }
+            ]}
+            onNavigateOrders={onNavigateOrders}
+          />
+        )}
+        <DashboardSectorGroup
+          title="Suporte"
+          icon={<Clock3 size={15} />}
+          metrics={[
+            { title: "Aguardando validação", value: metrics.awaitingValidation, icon: <Clock3 size={18} />, variant: "warning", statusKey: "pending_signature" }
+          ]}
+          onNavigateOrders={onNavigateOrders}
+        />
       </section>
 
       {/* Dois Gráficos Simples: Notas Realizadas e Assinaturas por Pessoa */}

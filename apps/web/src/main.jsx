@@ -7,6 +7,7 @@ import {
   Calendar,
   Check,
   CheckCircle2,
+  ChevronDown,
   ClipboardList,
   Clock3,
   Cpu,
@@ -1539,16 +1540,24 @@ function DashboardMetricCard({ title, value, icon, variant = "neutral", onClick 
 
 function DashboardSectorGroup({ title, icon, metrics, onNavigateOrders }) {
   const subtotal = metrics.reduce((sum, metric) => sum + (metric.value ?? 0), 0);
+  const [collapsed, setCollapsed] = useState(false);
   return (
-    <div className="dashboard-sector-group">
-      <div className="dashboard-sector-header">
+    <div className={`dashboard-sector-group${collapsed ? " collapsed" : ""}`}>
+      <button
+        type="button"
+        className="dashboard-sector-header"
+        onClick={() => setCollapsed((value) => !value)}
+        aria-expanded={!collapsed}
+        title={collapsed ? "Expandir" : "Retrair"}
+      >
         <span className="dashboard-sector-title">
+          <ChevronDown size={16} className="dashboard-sector-chevron" />
           {icon}
           {title}
         </span>
         <span className="dashboard-sector-count" title="Ordens em andamento neste setor">{subtotal}</span>
-      </div>
-      <div className="dashboard-sector-cards">
+      </button>
+      <div className="dashboard-sector-cards" hidden={collapsed}>
         {metrics.map((metric) => (
           <DashboardMetricCard
             key={metric.statusKey}
@@ -1565,21 +1574,17 @@ function DashboardSectorGroup({ title, icon, metrics, onNavigateOrders }) {
 }
 
 function DashboardPanel({ session, api, onNavigateOrders }) {
-  const [loading, setLoading] = useState(true);
   const [dashboardData, setDashboardData] = useState(null);
   const [error, setError] = useState(null);
 
   const fetchDashboard = React.useCallback(async () => {
     try {
-      setLoading(true);
       setError(null);
       const data = await api.request("/dashboard");
       setDashboardData(data);
     } catch (err) {
       console.error("Erro ao carregar dados do dashboard:", err);
       setError(err?.message ?? "Falha ao carregar indicadores.");
-    } finally {
-      setLoading(false);
     }
   }, [api]);
 
@@ -1628,6 +1633,31 @@ function DashboardPanel({ session, api, onNavigateOrders }) {
   }[userRole] || "Usuário";
   const showStockMetrics = ["admin", "requester", "stock"].includes(userRole);
 
+  const operationsSectorGroup = (
+    <DashboardSectorGroup
+      title="Operações"
+      icon={<Edit3 size={15} />}
+      metrics={[
+        { title: "Aguardando correção", value: metrics.awaitingCorrection, icon: <RefreshCw size={18} />, variant: "info", statusKey: "correction_requested" },
+        { title: "Divergências", value: metrics.divergent, icon: <AlertTriangle size={18} />, variant: "danger", statusKey: "divergent" }
+      ]}
+      onNavigateOrders={onNavigateOrders}
+    />
+  );
+
+  const stockSectorGroup = (
+    <DashboardSectorGroup
+      title="Estoque"
+      icon={<Inbox size={15} />}
+      metrics={[
+        { title: "Aguardando conferência", value: metrics.awaitingStockCheck, icon: <Inbox size={18} />, variant: "info", statusKey: "awaiting_stock_check" },
+        { title: "Em separação", value: metrics.stockPicking, icon: <Activity size={18} />, variant: "primary", statusKey: "stock_picking" },
+        { title: "Retorno do estoque", value: metrics.stockReturned, icon: <AlertTriangle size={18} />, variant: "warning", statusKey: "stock_returned" }
+      ]}
+      onNavigateOrders={onNavigateOrders}
+    />
+  );
+
   return (
     <div className="dashboard-panel">
       {/* Barra superior limpa e objetiva */}
@@ -1639,18 +1669,6 @@ function DashboardPanel({ session, api, onNavigateOrders }) {
           </div>
           <span className="dashboard-subtitle">Indicadores principais das ordens de serviço</span>
         </div>
-
-        <button
-          type="button"
-          className="dashboard-refresh-btn"
-          onClick={fetchDashboard}
-          disabled={loading}
-          title="Atualizar dados agora"
-          aria-label="Atualizar dados agora"
-        >
-          <RefreshCw size={14} className={loading ? "spin" : ""} />
-          <span>Atualizar</span>
-        </button>
       </div>
 
       {error && (
@@ -1684,27 +1702,10 @@ function DashboardPanel({ session, api, onNavigateOrders }) {
 
       {/* Estado das ordens separado pelo setor responsável pela próxima ação */}
       <section className="dashboard-sectors">
-        <DashboardSectorGroup
-          title="Operações"
-          icon={<Edit3 size={15} />}
-          metrics={[
-            { title: "Aguardando correção", value: metrics.awaitingCorrection, icon: <RefreshCw size={18} />, variant: "info", statusKey: "correction_requested" },
-            { title: "Divergências", value: metrics.divergent, icon: <AlertTriangle size={18} />, variant: "danger", statusKey: "divergent" }
-          ]}
-          onNavigateOrders={onNavigateOrders}
-        />
-        {showStockMetrics && (
-          <DashboardSectorGroup
-            title="Estoque"
-            icon={<Inbox size={15} />}
-            metrics={[
-              { title: "Aguardando conferência", value: metrics.awaitingStockCheck, icon: <Inbox size={18} />, variant: "info", statusKey: "awaiting_stock_check" },
-              { title: "Em separação", value: metrics.stockPicking, icon: <Activity size={18} />, variant: "primary", statusKey: "stock_picking" },
-              { title: "Retorno do estoque", value: metrics.stockReturned, icon: <AlertTriangle size={18} />, variant: "warning", statusKey: "stock_returned" }
-            ]}
-            onNavigateOrders={onNavigateOrders}
-          />
-        )}
+        {/* O perfil Estoque vê o próprio setor primeiro */}
+        {userRole === "stock" && stockSectorGroup}
+        {operationsSectorGroup}
+        {showStockMetrics && userRole !== "stock" && stockSectorGroup}
         <DashboardSectorGroup
           title="Suporte"
           icon={<Clock3 size={15} />}

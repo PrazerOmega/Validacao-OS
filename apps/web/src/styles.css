@@ -2041,30 +2041,6 @@ button.warning:hover {
   background: #134e46;
 }
 
-.dashboard-refresh-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  background: var(--card-subtle-bg);
-  border: 1px solid var(--panel-border);
-  border-radius: 7px;
-  padding: 6px 14px;
-  font-size: 12.5px;
-  font-weight: 700;
-  color: var(--text-primary);
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-.dashboard-refresh-btn:hover:not(:disabled) {
-  background: var(--card-hover-bg);
-  border-color: #166056;
-}
-
-.dashboard-refresh-btn .spin {
-  animation: spin 1s linear infinite;
-}
-
 @keyframes spin {
   100% {
     transform: rotate(360deg);
@@ -2124,6 +2100,27 @@ button.warning:hover {
   justify-content: space-between;
   align-items: center;
   gap: 8px;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dashboard-sector-chevron {
+  color: var(--text-muted);
+  transition: transform 0.2s ease;
+}
+
+.dashboard-sector-group.collapsed .dashboard-sector-chevron {
+  transform: rotate(-90deg);
+}
+
+.dashboard-sector-cards[hidden] {
+  display: none;
 }
 
 .dashboard-sector-title {

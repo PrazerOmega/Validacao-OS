@@ -358,17 +358,7 @@ function App() {
         setAdminStatusFilter(statusKey);
         setAdminMenu("orders");
       } else {
-        const mappedFilter = {
-          total: "todas",
-          pending_signature: "pendente_validacao",
-          correction_requested: "recertificar",
-          signed: "signed",
-          divergent: "divergent",
-          awaiting_stock_check: "estoque",
-          stock_picking: "em_separacao",
-          stock_returned: "retorno_estoque"
-        }[statusKey] || "todas";
-        setUserStatusFilter(mappedFilter);
+        setUserStatusFilter(dashboardStatusToUserFilter(statusKey));
         setUserMenu("orders");
       }
     });
@@ -828,21 +818,9 @@ function App() {
               <LayoutDashboard size={16} />
               <span>Dashboard</span>
             </button>
+            {/* Criar/editar ordem é aberto pelo botão "Nova ordem" do Histórico, que fica destacado nesse fluxo */}
             <button
-              className={`sidebar-btn sidebar-btn-primary ${userMenu === "create" ? "active" : ""}`}
-              onClick={() => {
-                safeNavigate(() => {
-                  setEditingId(null);
-                  setForm(createEmptyOrder(session?.user?.name ?? ""));
-                  setUserMenu("create");
-                });
-              }}
-            >
-              <Plus size={16} />
-              <span>Criar ordem</span>
-            </button>
-            <button
-              className={`sidebar-btn sidebar-btn-secondary ${userMenu === "orders" ? "active" : ""}`}
+              className={`sidebar-btn sidebar-btn-secondary ${["orders", "create"].includes(userMenu) ? "active" : ""}`}
               onClick={() => safeNavigate(() => setUserMenu("orders"))}
             >
               <ClipboardList size={16} />
@@ -1640,7 +1618,6 @@ function DashboardPanel({ session, api, onNavigateOrders }) {
     spectator: "Produção",
     stock: "Estoque"
   }[userRole] || "Usuário";
-  const showStockMetrics = ["admin", "requester", "stock"].includes(userRole);
 
   const operationsSectorGroup = (
     <DashboardSectorGroup
@@ -1709,12 +1686,11 @@ function DashboardPanel({ session, api, onNavigateOrders }) {
         </div>
       </section>
 
-      {/* Estado das ordens separado pelo setor responsável pela próxima ação */}
+      {/* Estado das ordens separado pelo setor responsável pela próxima ação.
+          Mesmo layout para todos os perfis (padrão do perfil Operações). */}
       <section className="dashboard-sectors">
-        {/* O perfil Estoque vê o próprio setor primeiro */}
-        {userRole === "stock" && stockSectorGroup}
+        {stockSectorGroup}
         {operationsSectorGroup}
-        {showStockMetrics && userRole !== "stock" && stockSectorGroup}
         <DashboardSectorGroup
           title="Suporte"
           icon={<Clock3 size={15} />}
@@ -2470,7 +2446,9 @@ function UserOrdersPanel({
   executorTab = "suporte",
   onExecutorTabChange,
   counts,
-  initialFilter = "pendente_validacao"
+  initialFilter = "pendente_validacao",
+  extraActions = null,
+  allowEdit = true
 }) {
   const [period, setPeriod] = useState("all");
   const [startDate, setStartDate] = useState(() => addDaysToKey(todayKey(), -6));
@@ -2500,52 +2478,96 @@ function UserOrdersPanel({
     )
   );
 
-  const filteredOrders = periodFilteredOrders.filter((order) =>
-    userOrderMatchesFilter(order, filter)
-  );
+  const [search, setSearch] = useState("");
+  const normalizedSearch = search.trim().toLowerCase();
+  const searchedOrders = normalizedSearch
+    ? periodFilteredOrders.filter((order) => orderMatchesSearch(order, normalizedSearch))
+    : periodFilteredOrders;
 
-  const isRequester = session?.user?.role === "requester";
-  const seesStockFlow = ["requester", "stock", "spectator"].includes(session?.user?.role);
-  const filterOptions = [
-    { value: "todas", label: "TODAS" },
-    ...(isRequester ? [{ value: "draft", label: "RASCUNHOS" }] : []),
-    ...(seesStockFlow
-      ? [
-        { value: "estoque", label: "CONFERÊNCIA ESTOQUE" },
-        { value: "em_separacao", label: "EM SEPARAÇÃO" },
-        { value: "retorno_estoque", label: "RETORNO DO ESTOQUE" }
+  // Rascunhos aparecem para quem os cria (Operações) e para o Admin, que acompanha todas as ordens
+  const canSeeDrafts = ["requester", "admin"].includes(session?.user?.role);
+  const countFor = (statusValues) =>
+    searchedOrders.filter((order) => statusValues.some((value) => userOrderMatchesFilter(order, value))).length;
+
+  // Área = setor responsável pela próxima ação (mesmo agrupamento do dashboard)
+  const areaOptions = [
+    {
+      value: "operacoes",
+      label: "Operações",
+      statuses: [
+        ...(canSeeDrafts ? [{ value: "draft", label: "Rascunhos" }] : []),
+        { value: "recertificar", label: "Aguardando correção" },
+        { value: "divergent", label: "Divergências" }
       ]
-      : []),
-    { value: "pendente_validacao", label: "PENDENTE VALIDAÇÃO" },
-    { value: "aguardando_1", label: "AGUARDANDO 1 ASSINATURA" },
-    { value: "signed", label: "ASSINADAS" },
-    { value: "recertificar", label: "RECERTIFICAR" },
-    { value: "divergent", label: "DIVERGÊNCIAS" }
+    },
+    {
+      value: "estoque",
+      label: "Estoque",
+      statuses: [
+        { value: "estoque", label: "Aguardando conferência" },
+        { value: "em_separacao", label: "Em separação" },
+        { value: "retorno_estoque", label: "Retorno do estoque" }
+      ]
+    },
+    {
+      value: "suporte",
+      label: "Suporte",
+      statuses: [
+        { value: "pendente_validacao", label: "Pendente validação" },
+        { value: "aguardando_1", label: "Aguardando 1 assinatura" }
+      ]
+    },
+    {
+      value: "concluidas",
+      label: "Concluídas",
+      statuses: [{ value: "signed", label: "Aprovadas" }]
+    }
   ];
+  const allStatuses = areaOptions.flatMap((area) => area.statuses);
+  const areaOfFilter = (value) => areaOptions.find((area) => area.statuses.some((s) => s.value === value))?.value ?? "all";
+
+  const [area, setArea] = useState(() => areaOfFilter(initialFilter || "pendente_validacao"));
+
+  useEffect(() => {
+    if (initialFilter) {
+      setArea(areaOfFilter(initialFilter));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialFilter]);
+
+  const currentArea = areaOptions.find((option) => option.value === area);
+  const statusesInArea = currentArea ? currentArea.statuses : allStatuses;
+  const statusSelectOptions = statusesInArea.map((status) => ({ ...status, count: countFor([status.value]) }));
+
+  const filteredOrders = searchedOrders.filter((order) => {
+    if (filter !== "todas") return userOrderMatchesFilter(order, filter);
+    if (!currentArea) return true;
+    return currentArea.statuses.some((status) => userOrderMatchesFilter(order, status.value));
+  });
+
+  function handleAreaChange(nextArea) {
+    setArea(nextArea);
+    setFilter("todas");
+  }
 
   return (
     <div className="content-grid user-orders-layout">
       <section className="orders-column">
         <div className="panel user-orders-panel">
-          <div className="panel-title">
-            <ClipboardList size={18} />
-            <h3>Ordens de servico</h3>
+          <div className="orders-panel-header">
+            <div className="panel-title">
+              <ClipboardList size={18} />
+              <h3>Ordens de serviço</h3>
+            </div>
+            {session.user.role === "requester" && (
+              <button className="primary orders-new-btn" onClick={onNewOrder}>
+                <Plus size={16} />
+                Nova ordem
+              </button>
+            )}
           </div>
 
           <div className="orders-executor-tabs" role="tablist" aria-label="Equipe executora">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={executorTab === "suporte"}
-              className={`executor-tab-btn ${executorTab === "suporte" ? "active" : ""}`}
-              onClick={() => onExecutorTabChange && onExecutorTabChange("suporte")}
-            >
-              <Wrench size={16} />
-              <span>Requisições para Suporte</span>
-              {counts?.suporte !== undefined && (
-                <span className="executor-tab-count">{counts.suporte}</span>
-              )}
-            </button>
             <button
               type="button"
               role="tab"
@@ -2557,6 +2579,19 @@ function UserOrdersPanel({
               <span>Requisições para Produção</span>
               {counts?.producao !== undefined && (
                 <span className="executor-tab-count">{counts.producao}</span>
+              )}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={executorTab === "suporte"}
+              className={`executor-tab-btn ${executorTab === "suporte" ? "active" : ""}`}
+              onClick={() => onExecutorTabChange && onExecutorTabChange("suporte")}
+            >
+              <Wrench size={16} />
+              <span>Requisições para Suporte</span>
+              {counts?.suporte !== undefined && (
+                <span className="executor-tab-count">{counts.suporte}</span>
               )}
             </button>
             {counts?.unassigned > 0 && (
@@ -2574,44 +2609,100 @@ function UserOrdersPanel({
             )}
           </div>
 
-          <PeriodFilterControl
-            period={period}
-            onPeriodChange={setPeriod}
-            startDate={startDate}
-            onStartDateChange={setStartDate}
-            endDate={endDate}
-            onEndDateChange={setEndDate}
-            onApplyCustom={() => setAppliedCustomDates({ start: startDate, end: endDate })}
-          />
-
-          <div className="user-order-filters">
-            {filterOptions.map((option) => (
-              <button
-                className={filter === option.value ? "active" : ""}
-                key={option.value}
-                onClick={() => setFilter(option.value)}
-              >
-                {option.label}
-              </button>
-            ))}
+          <div className="orders-toolbar">
+            <label className="orders-search">
+              <Search size={15} />
+              <input
+                type="search"
+                placeholder="Buscar código, modelo, cliente…"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                aria-label="Buscar ordens"
+              />
+            </label>
+            <label className="orders-period-select">
+              <Calendar size={15} />
+              <select value={period} onChange={(event) => setPeriod(event.target.value)} aria-label="Período">
+                <option value="all">Todo o período</option>
+                <option value="today">Hoje</option>
+                <option value="7d">Últimos 7 dias</option>
+                <option value="30d">Últimos 30 dias</option>
+                <option value="month">Este mês</option>
+                <option value="custom">Personalizado</option>
+              </select>
+            </label>
           </div>
-          {session.user.role === "requester" && (
-            <button className="primary" onClick={onNewOrder}>
-              <Plus size={18} />
-              Nova ordem
-            </button>
+
+          {period === "custom" && (
+            <div className="orders-custom-dates">
+              <label>
+                <span>De</span>
+                <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+              </label>
+              <label>
+                <span>Até</span>
+                <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
+              </label>
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => setAppliedCustomDates({ start: startDate, end: endDate })}
+              >
+                Aplicar
+              </button>
+            </div>
           )}
+
+          <div className="orders-selects">
+            <label className="orders-select-field">
+              <span>Área</span>
+              <select value={area} onChange={(event) => handleAreaChange(event.target.value)}>
+                <option value="all">Todas as áreas ({searchedOrders.length})</option>
+                {areaOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label} ({countFor(option.statuses.map((s) => s.value))})
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="orders-select-field">
+              <span>Status</span>
+              <select value={filter} onChange={(event) => setFilter(event.target.value)}>
+                <option value="todas">
+                  Todos os status
+                </option>
+                {statusSelectOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label} ({option.count})
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          {extraActions && extraActions(filteredOrders)}
         </div>
-        <div className="order-list">
-          {filteredOrders.map((order) => (
-            <OrderRow
-              key={order.id}
-              order={order}
-              active={selected?.id === order.id}
-              onClick={() => onSelectOrder(order)}
-            />
-          ))}
-          {filteredOrders.length === 0 && <p className="muted">Nenhuma ordem encontrada neste período e filtro.</p>}
+
+        <div className="order-list-panel">
+          <div className="order-list-summary">
+            <span>
+              {filteredOrders.length} {filteredOrders.length === 1 ? "ordem" : "ordens"}
+            </span>
+            <span className="muted">{formatPeriodRange(period, appliedCustomDates.start, appliedCustomDates.end)}</span>
+          </div>
+          <div className="order-list">
+            {filteredOrders.map((order) => (
+              <OrderRow
+                key={order.id}
+                order={order}
+                active={selected?.id === order.id}
+                onClick={() => onSelectOrder(order)}
+              />
+            ))}
+            {filteredOrders.length === 0 && (
+              <p className="order-list-empty">Nenhuma ordem encontrada com estes filtros.</p>
+            )}
+          </div>
         </div>
       </section>
       <OrderDetails
@@ -2627,6 +2718,7 @@ function UserOrdersPanel({
         onIncorrectSignature={onIncorrectSignature}
         onOrderAction={onOrderAction}
         onEdit={onEdit}
+        allowEdit={allowEdit}
       />
     </div>
   );
@@ -2703,205 +2795,46 @@ function AdminConsole({
           onCreateCatalogItem={onCreateCatalogItem}
         />
       ) : (
-        <div className="admin-orders-layout">
-          <AdminOrdersPanel
-            orders={orders}
-            selected={selected}
-            onSelectOrder={onSelectOrder}
-            onClearAllOrders={onClearAllOrders}
-            executorTab={executorTab}
-            onExecutorTabChange={onExecutorTabChange}
-            counts={counts}
-            initialStatusFilter={initialStatusFilter}
-          />
-          <OrderDetails
-            session={session}
-            selected={selected}
-            feedback={feedback}
-            setFeedback={setFeedback}
-            signatureName={signatureName}
-            setSignatureName={setSignatureName}
-            onSubmit={onSubmitOrder}
-            onSign={onSignOrder}
-            onCorrection={onCorrection}
-            onIncorrectSignature={onIncorrectSignature}
-            onOrderAction={onOrderAction}
-            onEdit={onEditOrder}
-            allowEdit={false}
-          />
-        </div>
+        // Mesmo layout do "Histórico de ordens" do Solicitante, com as ações exclusivas do Admin
+        <UserOrdersPanel
+          orders={orders}
+          selected={selected}
+          session={session}
+          feedback={feedback}
+          setFeedback={setFeedback}
+          signatureName={signatureName}
+          setSignatureName={setSignatureName}
+          onSelectOrder={onSelectOrder}
+          onSubmit={onSubmitOrder}
+          onSign={onSignOrder}
+          onCorrection={onCorrection}
+          onIncorrectSignature={onIncorrectSignature}
+          onOrderAction={onOrderAction}
+          onEdit={onEditOrder}
+          allowEdit={false}
+          executorTab={executorTab}
+          onExecutorTabChange={onExecutorTabChange}
+          counts={counts}
+          initialFilter={dashboardStatusToUserFilter(initialStatusFilter)}
+          extraActions={(filteredOrders) => (
+            <AdminOrdersActions
+              orders={orders}
+              filteredOrders={filteredOrders}
+              onClearAllOrders={onClearAllOrders}
+            />
+          )}
+        />
       )}
     </section>
   );
 }
 
-function AdminOrdersPanel({
-  orders,
-  selected,
-  onSelectOrder,
-  onClearAllOrders,
-  executorTab = "suporte",
-  onExecutorTabChange,
-  counts,
-  initialStatusFilter = "total"
-}) {
-  const [period, setPeriod] = useState("all");
-  const [startDate, setStartDate] = useState(() => addDaysToKey(todayKey(), -6));
-  const [endDate, setEndDate] = useState(() => todayKey());
-  const [appliedCustomDates, setAppliedCustomDates] = useState({ start: startDate, end: endDate });
-  const [statusFilter, setStatusFilter] = useState(initialStatusFilter || "total");
-  const [orderSearch, setOrderSearch] = useState("");
+function AdminOrdersActions({ orders, filteredOrders, onClearAllOrders }) {
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
-  const normalizedSearch = orderSearch.trim().toLowerCase();
-
-  useEffect(() => {
-    if (initialStatusFilter) {
-      setStatusFilter(initialStatusFilter);
-    }
-  }, [initialStatusFilter]);
-
-  const teamFilteredOrders = orders.filter((order) => {
-    if (executorTab === "suporte") return order.executor_team === "suporte";
-    if (executorTab === "producao") return order.executor_team === "producao";
-    if (executorTab === "unassigned") return !order.executor_team;
-    return true;
-  });
-
-  const periodFilteredOrders = teamFilteredOrders.filter((order) =>
-    orderMatchesPeriod(
-      order,
-      period,
-      period === "custom" ? appliedCustomDates.start : startDate,
-      period === "custom" ? appliedCustomDates.end : endDate
-    )
-  );
-
-  const countsByStatus = periodFilteredOrders.reduce(
-    (acc, order) => {
-      acc.total += 1;
-      acc[order.status] = (acc[order.status] ?? 0) + 1;
-      if (order.status !== "divergent" && Number(order.incorrect_signatures) > 0) {
-        acc.divergent = (acc.divergent ?? 0) + 1;
-      }
-      return acc;
-    },
-    {
-      total: 0, draft: 0, pending_signature: 0, correction_requested: 0, divergent: 0, signed: 0, cancelled: 0,
-      awaiting_stock_check: 0, stock_checking: 0, stock_picking: 0, stock_returned: 0
-    }
-  );
-
-  const statusFilteredOrders = statusFilter === "total"
-    ? periodFilteredOrders
-    : statusFilter === "divergent"
-      ? periodFilteredOrders.filter((order) => order.status === "divergent" || Number(order.incorrect_signatures) > 0)
-      : statusFilter === "awaiting_stock_check"
-        ? periodFilteredOrders.filter((order) => ["awaiting_stock_check", "stock_checking"].includes(order.status))
-        : periodFilteredOrders.filter((order) => order.status === statusFilter);
-
-  const filteredOrders = normalizedSearch
-    ? statusFilteredOrders.filter((order) => orderMatchesSearch(order, normalizedSearch))
-    : statusFilteredOrders;
 
   return (
-    <section className="panel admin-orders-panel">
-      <div className="panel-title">
-        <ClipboardList size={18} />
-        <h3>Ordens de servicos</h3>
-      </div>
-
-      <div className="orders-executor-tabs" role="tablist" aria-label="Equipe executora">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={executorTab === "suporte"}
-          className={`executor-tab-btn ${executorTab === "suporte" ? "active" : ""}`}
-          onClick={() => onExecutorTabChange && onExecutorTabChange("suporte")}
-        >
-          <Wrench size={16} />
-          <span>Requisições para Suporte</span>
-          {counts?.suporte !== undefined && (
-            <span className="executor-tab-count">{counts.suporte}</span>
-          )}
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={executorTab === "producao"}
-          className={`executor-tab-btn ${executorTab === "producao" ? "active" : ""}`}
-          onClick={() => onExecutorTabChange && onExecutorTabChange("producao")}
-        >
-          <Cpu size={16} />
-          <span>Requisições para Produção</span>
-          {counts?.producao !== undefined && (
-            <span className="executor-tab-count">{counts.producao}</span>
-          )}
-        </button>
-        {counts?.unassigned > 0 && (
-          <button
-            type="button"
-            role="tab"
-            aria-selected={executorTab === "unassigned"}
-            className={`executor-tab-btn ${executorTab === "unassigned" ? "active" : ""}`}
-            onClick={() => onExecutorTabChange && onExecutorTabChange("unassigned")}
-            title="Ordens anteriores sem classificação de equipe"
-          >
-            <span>Sem classificação</span>
-            <span className="executor-tab-count">{counts.unassigned}</span>
-          </button>
-        )}
-      </div>
-
-      <PeriodFilterControl
-        period={period}
-        onPeriodChange={setPeriod}
-        startDate={startDate}
-        onStartDateChange={setStartDate}
-        endDate={endDate}
-        onEndDateChange={setEndDate}
-        onApplyCustom={() => setAppliedCustomDates({ start: startDate, end: endDate })}
-      />
-
-      <div className="status-summary">
-        <button className={statusFilter === "total" ? "active" : ""} onClick={() => setStatusFilter("total")}>
-          <strong>{countsByStatus.total}</strong><span>Todas</span>
-        </button>
-        <button className={statusFilter === "draft" ? "active" : ""} onClick={() => setStatusFilter("draft")}>
-          <strong>{countsByStatus.draft}</strong><span>Rascunhos</span>
-        </button>
-        <button className={statusFilter === "awaiting_stock_check" ? "active" : ""} onClick={() => setStatusFilter("awaiting_stock_check")}>
-          <strong>{countsByStatus.awaiting_stock_check + countsByStatus.stock_checking}</strong><span>Conferência estoque</span>
-        </button>
-        <button className={statusFilter === "stock_picking" ? "active" : ""} onClick={() => setStatusFilter("stock_picking")}>
-          <strong>{countsByStatus.stock_picking}</strong><span>Em separação</span>
-        </button>
-        <button className={statusFilter === "stock_returned" ? "active" : ""} onClick={() => setStatusFilter("stock_returned")}>
-          <strong>{countsByStatus.stock_returned}</strong><span>Retorno do estoque</span>
-        </button>
-        <button className={statusFilter === "pending_signature" ? "active" : ""} onClick={() => setStatusFilter("pending_signature")}>
-          <strong>{countsByStatus.pending_signature}</strong><span>Pendente Validação</span>
-        </button>
-        <button className={statusFilter === "correction_requested" ? "active" : ""} onClick={() => setStatusFilter("correction_requested")}>
-          <strong>{countsByStatus.correction_requested}</strong><span>Aguardando correção</span>
-        </button>
-        <button className={statusFilter === "signed" ? "active" : ""} onClick={() => setStatusFilter("signed")}>
-          <strong>{countsByStatus.signed}</strong><span>Aprovadas</span>
-        </button>
-        <button className={statusFilter === "divergent" ? "active" : ""} onClick={() => setStatusFilter("divergent")}>
-          <strong>{countsByStatus.divergent}</strong><span>Divergências</span>
-        </button>
-      </div>
-
-      <div className="search-field orders-search">
-        <Search size={17} />
-        <input
-          placeholder="Pesquisar por OS, tipo, modelo, cliente ou solicitante"
-          value={orderSearch}
-          onChange={(event) => setOrderSearch(event.target.value)}
-        />
-      </div>
-
+    <>
       <div className="admin-orders-actions-bar">
         <div className="export-actions">
           <button className="ghost" type="button" onClick={() => exportOrdersToExcel(filteredOrders, "filtrado")} disabled={filteredOrders.length === 0}>
@@ -2980,57 +2913,45 @@ function AdminOrdersPanel({
           </div>
         </div>
       )}
-
-      <div className="admin-order-list">
-        {filteredOrders.map((order) => (
-          <button
-            className={`admin-order-row ${selected?.id === order.id ? "active" : ""}`}
-            key={order.id}
-            onClick={() => onSelectOrder(order)}
-          >
-            <span>
-              <strong>{order.code}</strong>
-              <span className={`badge-executor-team ${order.executor_team === "producao" ? "producao" : order.executor_team === "suporte" ? "suporte" : "unassigned"}`}>
-                {order.executor_team === "producao" ? "Produção" : order.executor_team === "suporte" ? "Suporte" : "Sem equipe"}
-              </span>
-              <small>{orderSummary(order)} | {order.authorized_person_name}</small>
-              {Number(order.incorrect_signatures) > 0 && (
-                <span className="badge-incorrect-attempt" title={`${order.incorrect_signatures} tentativa(s) incorreta(s)`}>
-                  ⚠️ {order.incorrect_signatures} {Number(order.incorrect_signatures) === 1 ? "tentativa incorreta" : "tentativas incorretas"}
-                </span>
-              )}
-            </span>
-            <span>
-              <em>{statusLabels[order.status]}</em>
-              <small>{orderValidationHint(order)}</small>
-            </span>
-          </button>
-        ))}
-        {filteredOrders.length === 0 && <p className="muted">Nenhuma ordem encontrada neste filtro.</p>}
-      </div>
-    </section>
+    </>
   );
 }
 
 function OrderRow({ order, active, onClick }) {
   const Icon = statusIcons[order.status] ?? FileSignature;
 
+  const incorrect = Number(order.incorrect_signatures ?? 0);
+  const signatureCount = Number(order.signature_count ?? 0);
+  const models = order.terminal_models || order.item_identifier;
+  const clients = order.client_names && order.client_names !== "-" ? order.client_names : null;
+  const team = order.executor_team === "producao" ? "Produção" : order.executor_team === "suporte" ? "Suporte" : "Sem equipe";
+
   return (
-    <button className={`order-row ${active ? "active" : ""}`} onClick={onClick}>
-      <span className={`status-dot ${order.status}`}><Icon size={15} /></span>
-      <span>
-        <strong>{order.code}</strong>
-        <span className={`badge-executor-team ${order.executor_team === "producao" ? "producao" : order.executor_team === "suporte" ? "suporte" : "unassigned"}`}>
-          {order.executor_team === "producao" ? "Produção" : order.executor_team === "suporte" ? "Suporte" : "Sem equipe"}
+    <button className={`order-row ${active ? "active" : ""}`} onClick={onClick} aria-current={active ? "true" : undefined}>
+      <span className="order-row-top">
+        <strong className="order-row-code">{order.code}</strong>
+        <span className={`status-badge ${order.status}`}>
+          <Icon size={12} />
+          {statusLabels[order.status] ?? order.status}
         </span>
-        <small>{typeLabel(order.order_type)} | {orderSummary(order)} | {order.authorized_person_name}</small>
-        {Number(order.incorrect_signatures) > 0 && (
-          <span className="badge-incorrect-attempt" title={`${order.incorrect_signatures} tentativa(s) incorreta(s)`}>
-            ⚠️ {order.incorrect_signatures} {Number(order.incorrect_signatures) === 1 ? "tentativa incorreta" : "tentativas incorretas"}
+      </span>
+      <span className="order-row-title">
+        {typeLabel(order.order_type)}
+        {models ? ` · ${models}` : ""}
+        {order.total_quantity ? ` · Qtd ${order.total_quantity}` : ""}
+      </span>
+      {clients && <span className="order-row-sub">{clients}</span>}
+      <span className="order-row-meta">
+        <span>{team}</span>
+        <span>{formatDate(order.created_at)}</span>
+        <span>{signatureCount}/2 assinaturas</span>
+        {incorrect > 0 && (
+          <span className="order-row-warning" title={`${incorrect} tentativa(s) incorreta(s)`}>
+            <AlertTriangle size={12} />
+            {incorrect} {incorrect === 1 ? "tentativa incorreta" : "tentativas incorretas"}
           </span>
         )}
       </span>
-      <em>{statusLabels[order.status]} ({order.signature_count ?? 0}/2)</em>
     </button>
   );
 }
@@ -3278,27 +3199,68 @@ function StockCheckPanel({ order, items, onAction }) {
 
       <div className="stock-accessories-section">
         <h4>Itens que acompanham o terminal</h4>
-        <p className="muted">Marque o que está sendo enviado junto. Os itens com * foram pedidos na OS.</p>
-        {items.map((item, index) => (
+        <p className="muted">Marque o que está sendo enviado junto com cada terminal.</p>
+        <div className="stock-accessories-grid">
+        {items.map((item, index) => {
+          const selectedKeys = accessories[item.id] ?? [];
+          const requestedKeys = stockAccessoryOptions.filter((option) => option.requestedBy(item)).map((option) => option.key);
+          const pendingRequested = requestedKeys.filter((key) => !selectedKeys.includes(key)).length;
+          return (
           <div className="stock-accessories-line" key={item.id}>
-            <strong>Item {index + 1}: {item.terminal_model}</strong>
-            <div className="stock-accessories-options">
+            <div className="stock-accessories-header">
+              <div className="stock-accessories-title">
+                <strong>Item {index + 1}: {item.terminal_model}</strong>
+                <small className="muted">
+                  {[item.part_number, item.client_name].filter(Boolean).join(" · ")}
+                  {" · "}solicitado {item.quantity}
+                </small>
+              </div>
+              <span
+                className={`stock-accessories-progress ${pendingRequested > 0 ? "pending" : ""}`}
+                title={pendingRequested > 0 ? `${pendingRequested} pedido(s) na OS ainda não marcado(s)` : "Todos os pedidos na OS estão marcados"}
+              >
+                {selectedKeys.length}/{stockAccessoryOptions.length}
+              </span>
+            </div>
+            {requestedKeys.length > 0 && pendingRequested > 0 && (
+              <button
+                type="button"
+                className="ghost stock-accessories-quick"
+                onClick={() => setAccessories((current) => ({
+                  ...current,
+                  [item.id]: Array.from(new Set([...(current[item.id] ?? []), ...requestedKeys]))
+                }))}
+              >
+                <CheckCircle2 size={14} />
+                Marcar pedidos na OS ({pendingRequested})
+              </button>
+            )}
+            <div className="stock-accessories-checklist">
               {stockAccessoryOptions.map((option) => {
                 const checked = (accessories[item.id] ?? []).includes(option.key);
                 const requested = option.requestedBy(item);
+                const missing = requested && !checked;
                 return (
                   <label
                     key={option.key}
-                    className={`stock-accessory-chip ${checked ? "checked" : ""} ${requested && !checked ? "missing" : ""}`}
+                    className={`stock-accessory-row ${checked ? "checked" : ""} ${missing ? "missing" : ""}`}
                   >
                     <input type="checkbox" checked={checked} onChange={() => toggleAccessory(item.id, option.key)} />
-                    <span>{option.label}{requested ? " *" : ""}</span>
+                    <span className="stock-accessory-name">{option.label}</span>
+                    {requested && (
+                      <span className="stock-accessory-requested">
+                        {missing && <AlertTriangle size={14} aria-hidden="true" />}
+                        pedido na OS
+                      </span>
+                    )}
                   </label>
                 );
               })}
             </div>
           </div>
-        ))}
+          );
+        })}
+        </div>
       </div>
 
       <button
@@ -3426,7 +3388,7 @@ function OrderDetails({
       <section className="panel empty-state">
         <History size={34} />
         <h3>Selecione uma ordem</h3>
-        <p className="muted">O detalhe mostra dados, assinaturas e historico da autorizacao.</p>
+        <p className="muted">Escolha uma ordem na lista para ver dados, itens, assinaturas e histórico.</p>
       </section>
     );
   }
@@ -3475,10 +3437,21 @@ function OrderDetails({
   return (
     <section className="panel detail-panel">
       <div className="detail-head">
-        <div>
-          <p className="eyebrow">{selected.code}</p>
-          <h2>{orderSummary(selected)}</h2>
-          <p className="muted">{statusLabels[selected.status]} | {signatures.length}/2 assinaturas</p>
+        <div className="detail-head-main">
+          <p className="eyebrow">OS {selected.code}</p>
+          <h2>{typeLabel(selected.order_type)} · {[...new Set(items.map((item) => item.terminal_model).filter(Boolean))].join(", ") || "—"}</h2>
+          <div className="detail-head-status">
+            <span className={`status-badge ${selected.status}`}>
+              {React.createElement(statusIcons[selected.status] ?? FileSignature, { size: 12 })}
+              {statusLabels[selected.status] ?? selected.status}
+            </span>
+            <span className="signature-progress" title={`${signatures.length} de 2 assinaturas`}>
+              <span className="signature-progress-bar">
+                <span style={{ width: `${Math.min(signatures.length, 2) * 50}%` }} />
+              </span>
+              {signatures.length}/2 assinaturas
+            </span>
+          </div>
         </div>
         {canEdit && (
           <button className="ghost edit-order-button" onClick={() => onEdit(selected)} title="Editar OS">
@@ -3504,7 +3477,7 @@ function OrderDetails({
           <div className="incorrect-signature-callout-header">
             <div>
               <AlertTriangle size={20} color="#d97706" />
-              <strong>⚠️ Assinatura incorreta — {selected.incorrect_signatures} {Number(selected.incorrect_signatures) === 1 ? "tentativa" : "tentativas"}</strong>
+              <strong>Assinatura incorreta — {selected.incorrect_signatures} {Number(selected.incorrect_signatures) === 1 ? "tentativa" : "tentativas"}</strong>
             </div>
             <span className="incorrect-tag">Retornou para assinatura</span>
           </div>
@@ -3574,6 +3547,7 @@ function OrderDetails({
         </section>
       )}
 
+      <h3 className="detail-section-title">Dados da ordem</h3>
       <dl className="info-grid">
         <div><dt>Tipo da ordem</dt><dd>{typeLabel(selected.order_type)}</dd></div>
         <div>
@@ -3595,42 +3569,40 @@ function OrderDetails({
         <div><dt>Clientes</dt><dd>{items.map((item) => item.client_name).join(", ")}</dd></div>
         <div><dt>Quantia total</dt><dd>{items.reduce((sum, item) => sum + Number(item.quantity ?? 0), 0)}</dd></div>
         <div><dt>Criada por</dt><dd>{selected.requester_name}</dd></div>
-        <div><dt>Data Solicitacao</dt><dd>{formatDate(selected.valid_from)}</dd></div>
+        <div><dt>Data da solicitação</dt><dd>{formatDate(selected.valid_from)}</dd></div>
         {session.user.role !== "requester" && (
-          <div><dt>Destinatario</dt><dd>{destinationLabel(selected.destination_role)}</dd></div>
+          <div><dt>Destinatário</dt><dd>{destinationLabel(selected.destination_role)}</dd></div>
         )}
-        <div><dt>Prazo Assinatura</dt><dd>{formatDateTime(selected.signature_due_at)}</dd></div>
-        <div><dt>Aprovacao</dt><dd>{signatures.length >= 2 ? "Completa" : `${signatures.length}/2 assinaturas`}</dd></div>
+        <div><dt>Prazo de assinatura</dt><dd>{formatDateTime(selected.signature_due_at)}</dd></div>
+        <div><dt>Aprovação</dt><dd>{signatures.length >= 2 ? "Completa" : `${signatures.length}/2 assinaturas`}</dd></div>
       </dl>
 
       <section>
-        <h3>Itens</h3>
+        <h3 className="detail-section-title">Itens ({items.length})</h3>
         <div className="items-table">
-          <div className={`items-table-head ${isSpectator ? "spectator" : ""}`}>
-            <span>Modelo</span>
-            <span>PN</span>
-            <span>Cliente</span>
-            <span>Nota</span>
-            <span>Quantia</span>
-            {!isSpectator && <span>Configuracao</span>}
-          </div>
           {items.map((item, idx) => (
             <div className="item-detail-card" key={item.id || idx}>
-              <div className={`items-table-row ${isSpectator ? "spectator" : ""}`}>
-                <span>{item.terminal_model}</span>
-                <span>{item.part_number}</span>
-                <span>{item.client_name}</span>
-                <span>{item.item_name || "—"}</span>
-                <span>
-                  {item.quantity}
+              <div className="item-card-head">
+                <div>
+                  <strong>{item.terminal_model || "—"}</strong>
+                  <span className="muted"> · PN {item.part_number || "—"}</span>
+                </div>
+                <span className="item-qty">
+                  Qtd {item.quantity}
                   {item.stock_checked_quantity != null && (
                     <small className={`stock-checked-qty ${item.stock_checked_quantity < item.quantity ? "short" : "ok"}`}>
-                      {" "}conferido {item.stock_checked_quantity}
+                      {" "}· conferido {item.stock_checked_quantity}
                     </small>
                   )}
                 </span>
-                {!isSpectator && <span>{item.configuration}</span>}
               </div>
+              <dl className="item-card-fields">
+                <div><dt>Cliente</dt><dd>{item.client_name || "—"}</dd></div>
+                <div><dt>Nota</dt><dd>{item.item_name || "—"}</dd></div>
+                {!isSpectator && (
+                  <div className="item-card-field-wide"><dt>Configuração</dt><dd>{item.configuration || "—"}</dd></div>
+                )}
+              </dl>
               {item.stock_accessories && (
                 <p className="stock-item-note">
                   Acompanha o terminal: {item.stock_accessories.length
@@ -3788,7 +3760,7 @@ function OrderDetails({
       )}
 
       <section className="signature-list">
-        <h3>Assinaturas registradas</h3>
+        <h3 className="detail-section-title">Assinaturas ({signatures.length}/2)</h3>
         {signatures.length === 0 && <p className="muted">Nenhuma assinatura registrada.</p>}
         {signatures.map((signature, index) => {
           const isCurrentUser = signature.signer_id === session.user.id;
@@ -3815,23 +3787,35 @@ function OrderDetails({
       </section>
 
       <section>
-        <h3>Historico</h3>
-        <div className="timeline">
+        <h3 className="detail-section-title">Histórico</h3>
+        {!selected.events?.length && <p className="muted">Nenhum evento registrado.</p>}
+        <ol className="timeline">
           {selected.events?.map((event) => {
             const actorName = event.actor_name || "Sistema";
+            const type = (event.event_type || "").toLowerCase();
+            const tone = /diverg|incorret|correç|correc|devolv|retorn/.test(type)
+              ? "tone-danger"
+              : /assin|aprov|conclu/.test(type)
+                ? "tone-success"
+                : /cria/.test(type)
+                  ? "tone-neutral"
+                  : "tone-info";
 
             return (
-              <article key={event.id}>
-                <span />
-                <div>
-                  <strong>{event.event_type}</strong>
-                  <p>{event.message}</p>
-                  <small>{actorName} | {formatDateTime(event.created_at)}</small>
+              <li key={event.id} className={`timeline-item ${tone}`}>
+                <span className="timeline-dot" aria-hidden="true" />
+                <div className="timeline-content">
+                  <div className="timeline-head">
+                    <strong>{event.event_type}</strong>
+                    <time dateTime={event.created_at}>{formatDateTime(event.created_at)}</time>
+                  </div>
+                  {event.message && <p>{event.message}</p>}
+                  <small>por {actorName}</small>
                 </div>
-              </article>
+              </li>
             );
           })}
-        </div>
+        </ol>
       </section>
     </section>
   );
@@ -4036,6 +4020,20 @@ function orderMatchesPeriod(order, period, startDate, endDate) {
 
   const orderKey = brasiliaDateKey(orderDate);
   return orderKey >= range[0] && orderKey <= range[1];
+}
+
+// Converte a chave de status clicada no dashboard no filtro do "Histórico de ordens"
+function dashboardStatusToUserFilter(statusKey) {
+  return {
+    total: "todas",
+    pending_signature: "pendente_validacao",
+    correction_requested: "recertificar",
+    signed: "signed",
+    divergent: "divergent",
+    awaiting_stock_check: "estoque",
+    stock_picking: "em_separacao",
+    stock_returned: "retorno_estoque"
+  }[statusKey] || "todas";
 }
 
 function userOrderMatchesFilter(order, filter) {

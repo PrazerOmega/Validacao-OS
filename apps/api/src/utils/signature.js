@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 
-export function buildSignature({ order, signer, signerName, keyCount, ipAddress, userAgent, items = [] }) {
-  const signedAt = new Date().toISOString();
+export function buildSignature({ order, signer, signerName, keyCount, ipAddress, userAgent, items = [], signedAt }) {
+  if (!signedAt) throw new Error("signedAt (hora oficial da rede) é obrigatório.");
   const serializedItems = items.map((item) => ({
     model: item.terminal_model || item.itemIdentifier || item.item_identifier || "",
     partNumber: item.part_number || item.partNumber || "",

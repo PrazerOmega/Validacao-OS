@@ -5,6 +5,9 @@ import { requireRole } from "../middleware/auth.js";
 import { addOrderEvent } from "../utils/audit.js";
 import { buildSignature } from "../utils/signature.js";
 import { sendOccurrenceEmail } from "../services/emailService.js";
+import { listNotificationEmails } from "./notifications.js";
+import { formatOrderCode, orderYearFor } from "../utils/orderCode.js";
+import { addDaysToDateKey, brasiliaDateKey, networkNow } from "../utils/networkTime.js";
 
 export const ordersRouter = express.Router();
 
@@ -237,6 +240,114 @@ async function upsertActiveOccurrence(client, { order, user, errorType, attemptC
   );
 }
 
+/**
+ * Registra no histórico uma tentativa incorreta de assinatura, com os dois assinantes
+ * envolvidos e a quantidade de chaves que cada um informou.
+ */
+async function recordSignatureAttempt(client, { orderId, attemptNumber, errorType, signatures, reportedBy, reason = null }) {
+  const [first, second] = signatures;
+  const createdAt = await networkNow();
+  await client.query(
+    `INSERT INTO signature_attempts (
+       service_order_id, attempt_number, error_type,
+       first_signer_id, first_signer_name, first_key_count,
+       second_signer_id, second_signer_name, second_key_count,
+       reported_by_id, reported_by_name, reason, created_at
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+    [
+      orderId,
+      attemptNumber,
+      errorType,
+      first?.signerId ?? null,
+      first?.signerName ?? null,
+      first?.keyCount ?? null,
+      second?.signerId ?? null,
+      second?.signerName ?? null,
+      second?.keyCount ?? null,
+      reportedBy.id,
+      reportedBy.name,
+      reason,
+      createdAt
+    ]
+  );
+}
+
+// Assinaturas atuais da OS (ordem de assinatura) com o nome do usuário
+async function loadSignaturesForAttempt(client, orderId) {
+  const { rows } = await client.query(
+    `SELECT os.signer_id, COALESCE(u.name, os.signer_name) AS signer_name, os.key_count
+     FROM order_signatures os
+     LEFT JOIN users u ON u.id = os.signer_id
+     WHERE os.service_order_id = $1
+     ORDER BY os.signed_at ASC`,
+    [orderId]
+  );
+  return rows.map((row) => ({ signerId: row.signer_id, signerName: row.signer_name, keyCount: row.key_count }));
+}
+
+/**
+ * Envia automaticamente o alerta da ocorrência ativa da OS para todos os e-mails
+ * cadastrados pelo admin. Roda após o COMMIT e nunca derruba a requisição de assinatura.
+ */
+async function notifyOccurrenceAutomatically(orderId, actorId) {
+  const occRes = await query(
+    "SELECT * FROM signature_occurrences WHERE service_order_id = $1 AND status <> 'resolved'",
+    [orderId]
+  );
+  const occurrence = occRes.rows[0];
+  if (!occurrence) return;
+
+  const recipients = await listNotificationEmails();
+  if (recipients.length === 0 && !process.env.NOTIFICATION_EMAIL) {
+    console.warn(`[Notificação automática] OS ${occurrence.order_code}: nenhum e-mail cadastrado para receber alertas.`);
+    return;
+  }
+
+  const orderRes = await query("SELECT * FROM service_orders WHERE id = $1", [orderId]);
+  const result = await sendOccurrenceEmail({
+    // O e-mail nunca leva quantidades de chaves (double check cego)
+    occurrence: sanitizeOccurrence(occurrence, { role: "system" }),
+    order: orderRes.rows[0] || {},
+    recipient: recipients.join(", ")
+  });
+
+  if (result.success) {
+    await query(
+      `UPDATE signature_occurrences
+       SET status = CASE WHEN status = 'resolved' THEN status ELSE 'email_sent' END,
+           email_sent_at = $3, email_recipient = $1, updated_at = NOW()
+       WHERE id = $2`,
+      [result.recipient, occurrence.id, result.sentAt]
+    );
+    await addOrderEvent({
+      orderId,
+      actorId,
+      eventType: "Ocorrência notificada",
+      message: `Alerta de ${occurrence.attempt_count} tentativas incorretas enviado automaticamente para ${result.recipient}.`,
+      metadata: { automatic: true }
+    });
+    return;
+  }
+
+  console.warn(`[Notificação automática] OS ${occurrence.order_code}: ${result.reason}`);
+  if (result.errorCode === "send_failed") {
+    await addOrderEvent({
+      orderId,
+      actorId,
+      eventType: "Falha na notificação",
+      message: `Não foi possível enviar automaticamente o alerta de tentativas incorretas para ${result.recipient}.`,
+      metadata: { automatic: true }
+    });
+  }
+}
+
+function triggerAutomaticNotification(orderId, actorId) {
+  notifyOccurrenceAutomatically(orderId, actorId).catch((error) => {
+    console.error("[Notificação automática] Erro inesperado:", error);
+  });
+}
+
 // Remove quantidades de chaves de descrições antigas (ex.: "(4 vs 1)") para perfis não administradores
 function sanitizeOccurrence(occurrence, user) {
   if (user.role === "admin") return occurrence;
@@ -258,10 +369,9 @@ async function findOrder(id) {
   return rows[0];
 }
 
-function defaultValidUntil() {
-  const date = new Date();
-  date.setDate(date.getDate() + 1);
-  return date.toISOString().slice(0, 10);
+// Dia seguinte no calendário de Brasília, a partir da hora oficial da rede.
+function defaultValidUntil(now) {
+  return addDaysToDateKey(brasiliaDateKey(now), 1);
 }
 
 async function validateCatalogOptions(values) {
@@ -424,11 +534,14 @@ ordersRouter.post("/", requireRole("requester", "admin"), async (req, res) => {
     return res.status(400).json({ message: catalogError });
   }
 
+  // Data/hora oficial de Brasília obtida pela rede (nunca do relógio da máquina).
+  const now = await networkNow();
+  const currentYear = orderYearFor(now);
+
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
 
-    const currentYear = new Date().getFullYear();
     const seqRes = await client.query(
       `INSERT INTO os_sequences (year, last_value)
        VALUES ($1, 1)
@@ -439,8 +552,7 @@ ordersRouter.post("/", requireRole("requester", "admin"), async (req, res) => {
     );
 
     const sequenceNumber = seqRes.rows[0].last_value;
-    const formattedSeq = String(sequenceNumber).padStart(4, "0");
-    const code = `${formattedSeq}/${currentYear}`;
+    const code = formatOrderCode(sequenceNumber, currentYear);
 
     // Solicitante é sempre o usuário logado
     const requesterName = req.user.name;
@@ -450,9 +562,9 @@ ordersRouter.post("/", requireRole("requester", "admin"), async (req, res) => {
       `INSERT INTO service_orders (
          code, order_year, order_sequence, order_type, executor_team, item_name, item_identifier,
          authorized_person_name, authorized_person_document, usage_reason,
-         valid_from, valid_until, requester_id, destination_role
+         valid_from, valid_until, requester_id, destination_role, created_at, updated_at
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CURRENT_DATE, $11, $12, $13)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $14, $11, $12, $13, $15, $15)
        RETURNING *`,
       [
         code,
@@ -465,9 +577,11 @@ ordersRouter.post("/", requireRole("requester", "admin"), async (req, res) => {
         requesterName,
         code,
         firstItem.configuration,
-        values.validUntil ?? defaultValidUntil(),
+        values.validUntil ?? defaultValidUntil(now),
         req.user.id,
-        "signer"
+        "signer",
+        brasiliaDateKey(now),
+        now
       ]
     );
 
@@ -525,13 +639,13 @@ ordersRouter.get("/divergent", requireRole("admin"), async (req, res) => {
 });
 
 ordersRouter.get("/next-code", async (req, res) => {
-  const currentYear = new Date().getFullYear();
+  const currentYear = orderYearFor(await networkNow());
   const { rows } = await query(
     "SELECT last_value FROM os_sequences WHERE year = $1",
     [currentYear]
   );
   const nextSeq = (rows[0]?.last_value ?? 0) + 1;
-  const nextCode = `${String(nextSeq).padStart(4, "0")}/${currentYear}`;
+  const nextCode = formatOrderCode(nextSeq, currentYear);
   return res.json({ nextCode, sequence: nextSeq, year: currentYear });
 });
 
@@ -588,7 +702,32 @@ ordersRouter.get("/occurrences", requireRole("admin", "signer"), async (req, res
      LEFT JOIN users req_u ON req_u.id = so.requester_id
      ORDER BY so_occ.created_at DESC`
   );
-  return res.json(rows.map((row) => sanitizeOccurrence(row, req.user)));
+
+  // Histórico das tentativas incorretas de cada OS (1º e 2º assinante de cada tentativa)
+  const orderIds = [...new Set(rows.map((row) => row.service_order_id))];
+  const attemptsByOrder = new Map();
+  if (orderIds.length > 0) {
+    const attemptsRes = await query(
+      `SELECT * FROM signature_attempts
+       WHERE service_order_id = ANY($1::uuid[])
+       ORDER BY attempt_number ASC, created_at ASC`,
+      [orderIds]
+    );
+    const isAdmin = req.user.role === "admin";
+    for (const attempt of attemptsRes.rows) {
+      // Quantidades de chaves só para o admin, para não quebrar o double check cego
+      const visible = isAdmin ? attempt : { ...attempt, first_key_count: null, second_key_count: null };
+      if (!attemptsByOrder.has(attempt.service_order_id)) attemptsByOrder.set(attempt.service_order_id, []);
+      attemptsByOrder.get(attempt.service_order_id).push(visible);
+    }
+  }
+
+  return res.json(
+    rows.map((row) => ({
+      ...sanitizeOccurrence(row, req.user),
+      attempts: attemptsByOrder.get(row.service_order_id) ?? []
+    }))
+  );
 });
 
 ordersRouter.post("/occurrences/:id/send-email", requireRole("admin", "signer"), async (req, res) => {
@@ -608,7 +747,9 @@ ordersRouter.post("/occurrences/:id/send-email", requireRole("admin", "signer"),
   const orderRes = await query("SELECT * FROM service_orders WHERE id = $1", [occurrence.service_order_id]);
   const order = orderRes.rows[0] || {};
 
-  const recipient = typeof req.body?.recipient === "string" ? req.body.recipient.trim() : "";
+  // Em branco: envia para todos os e-mails cadastrados pelo admin
+  const typedRecipient = typeof req.body?.recipient === "string" ? req.body.recipient.trim() : "";
+  const recipient = typedRecipient || (await listNotificationEmails()).join(", ");
   const result = await sendOccurrenceEmail({ occurrence: sanitizeOccurrence(occurrence, req.user), order, recipient });
 
   if (result.errorCode === "invalid_recipient" || result.errorCode === "missing_recipient") {
@@ -624,9 +765,9 @@ ordersRouter.post("/occurrences/:id/send-email", requireRole("admin", "signer"),
     await query(
       `UPDATE signature_occurrences
        SET status = CASE WHEN status = 'resolved' THEN status ELSE 'email_sent' END,
-           email_sent_at = NOW(), email_recipient = $1, updated_at = NOW()
+           email_sent_at = $3, email_recipient = $1, updated_at = NOW()
        WHERE id = $2`,
-      [result.recipient, occurrence.id]
+      [result.recipient, occurrence.id, result.sentAt]
     );
 
     await addOrderEvent({
@@ -878,7 +1019,7 @@ ordersRouter.put("/:id", requireRole("requester", "admin"), async (req, res) => 
       order.authorized_person_document || order.code,
       firstItem.configuration,
       order.valid_from,
-      values.validUntil ?? order.valid_until ?? defaultValidUntil(),
+      values.validUntil ?? order.valid_until ?? defaultValidUntil(await networkNow()),
       "signer",
       order.id
     ]
@@ -1334,10 +1475,20 @@ ordersRouter.post("/:id/sign", requireRole("signer"), async (req, res) => {
           [order.id]
         );
 
+        const [firstSignature] = await loadSignaturesForAttempt(client, order.id);
+
         // Limpa as assinaturas para que a OS retorne para a etapa de assinatura e fique novamente disponível
         await client.query("DELETE FROM order_signatures WHERE service_order_id = $1", [order.id]);
 
         const incorrectCount = rows[0].incorrect_signatures;
+
+        await recordSignatureAttempt(client, {
+          orderId: order.id,
+          attemptNumber: incorrectCount,
+          errorType: "divergencia_double_check",
+          signatures: [firstSignature, { signerId: req.user.id, signerName: req.user.name, keyCount: secondKeyCount }],
+          reportedBy: req.user
+        });
 
         if (incorrectCount >= 2) {
           const occDesc = `Identificadas ${incorrectCount} tentativas de assinatura com divergência no double check.`;
@@ -1367,6 +1518,10 @@ ordersRouter.post("/:id/sign", requireRole("signer"), async (req, res) => {
 
         await client.query("COMMIT");
 
+        if (incorrectCount >= 2) {
+          triggerAutomaticNotification(order.id, req.user.id);
+        }
+
         return res.json({
           incorrectSignature: true,
           divergent: false,
@@ -1393,13 +1548,14 @@ ordersRouter.post("/:id/sign", requireRole("signer"), async (req, res) => {
       keyCount,
       ipAddress,
       userAgent,
-      items: itemsRes.rows
+      items: itemsRes.rows,
+      signedAt: (await networkNow()).toISOString()
     });
 
     await client.query(
-      `INSERT INTO order_signatures (service_order_id, signer_id, signer_name, signature_hash, signed_payload, ip_address, user_agent, key_count)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [order.id, req.user.id, signerName, signatureHash, payload, ipAddress, userAgent, keyCount]
+      `INSERT INTO order_signatures (service_order_id, signer_id, signer_name, signature_hash, signed_payload, ip_address, user_agent, key_count, signed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [order.id, req.user.id, signerName, signatureHash, payload, ipAddress, userAgent, keyCount, payload.signedAt]
     );
 
     const signatureCount = existingSignatures.rows.length + 1;
@@ -1472,10 +1628,21 @@ ordersRouter.post("/:id/incorrect-signature", requireRole("signer", "admin"), as
       [order.id]
     );
 
+    const signaturesBefore = await loadSignaturesForAttempt(client, order.id);
+
     await client.query("DELETE FROM order_signatures WHERE service_order_id = $1", [order.id]);
 
     const incorrectCount = rows[0].incorrect_signatures;
     const reason = req.body?.reason ? ` Motivo: ${req.body.reason}.` : "";
+
+    await recordSignatureAttempt(client, {
+      orderId: order.id,
+      attemptNumber: incorrectCount,
+      errorType: "assinatura_incorreta",
+      signatures: signaturesBefore,
+      reportedBy: req.user,
+      reason: typeof req.body?.reason === "string" ? req.body.reason.trim() || null : null
+    });
 
     if (incorrectCount >= 2) {
       const occDesc = `Identificadas ${incorrectCount} tentativas incorretas de assinatura.${reason}`;
@@ -1504,6 +1671,10 @@ ordersRouter.post("/:id/incorrect-signature", requireRole("signer", "admin"), as
     );
 
     await client.query("COMMIT");
+
+    if (incorrectCount >= 2) {
+      triggerAutomaticNotification(order.id, req.user.id);
+    }
 
     return res.json({
       incorrectSignature: true,

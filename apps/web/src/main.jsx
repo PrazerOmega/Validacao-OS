@@ -36,6 +36,15 @@ import {
   XCircle
 } from "lucide-react";
 import "./styles.css";
+import {
+  BRASILIA_TIMEZONE,
+  addDaysToKey,
+  brasiliaDateKey,
+  keyToBr,
+  startOfficialTimeSync,
+  syncOfficialTime,
+  todayKey
+} from "./officialTime.js";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:3333";
 
@@ -1341,11 +1350,11 @@ function OrderForm({ form, setForm, catalog, editingId, onSubmit, onCancel, onDi
       <div className="two-columns">
         <div className="auto-field">
           <span>Data Solicitacao</span>
-          <strong>{editingId && form.validFrom ? formatDate(form.validFrom) : formatDate(today())}</strong>
+          <strong>{editingId && form.validFrom ? formatDate(form.validFrom) : keyToBr(todayKey())}</strong>
         </div>
         <div className="auto-field">
           <span>Prazo Assinatura</span>
-          <strong>{editingId && form.signatureDueAt ? formatDateTime(form.signatureDueAt) : formatDate(tomorrow())}</strong>
+          <strong>{editingId && form.signatureDueAt ? formatDateTime(form.signatureDueAt) : keyToBr(addDaysToKey(todayKey(), 1))}</strong>
         </div>
       </div>
       <section className="order-items-editor">
@@ -1834,7 +1843,160 @@ function DashboardCharts({ charts }) {
   );
 }
 
-function OccurrencesPanel({ api, onSelectOrder }) {
+// Admin cadastra os e-mails que recebem automaticamente o alerta quando uma OS
+// atinge 2 tentativas incorretas de assinatura.
+function NotificationEmailsCard({ api }) {
+  const [emails, setEmails] = useState([]);
+  const [newEmail, setNewEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState(null);
+
+  const load = useCallback(async () => {
+    try {
+      setEmails((await api.request("/notification-emails")) || []);
+    } catch (err) {
+      setMessage({ type: "error", text: err?.message || "Falha ao carregar os e-mails cadastrados." });
+    }
+  }, [api]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function handleAdd(event) {
+    event.preventDefault();
+    const email = newEmail.trim();
+    if (!email) return;
+    try {
+      setBusy(true);
+      setMessage(null);
+      await api.request("/notification-emails", { method: "POST", body: JSON.stringify({ email }) });
+      setNewEmail("");
+      await load();
+    } catch (err) {
+      setMessage({ type: "error", text: err?.message || "Não foi possível cadastrar o e-mail." });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRemove(item) {
+    if (!window.confirm(`Remover ${item.email} da lista de notificações?`)) return;
+    try {
+      setMessage(null);
+      await api.request(`/notification-emails/${item.id}`, { method: "DELETE" });
+      await load();
+    } catch (err) {
+      setMessage({ type: "error", text: err?.message || "Não foi possível remover o e-mail." });
+    }
+  }
+
+  return (
+    <section className="panel catalog-card notification-emails-card">
+      <div className="panel-title">
+        <Mail size={18} />
+        <h3>E-mails que recebem os alertas</h3>
+      </div>
+      <p className="muted">
+        Ao chegar em 2 tentativas incorretas de assinatura, um alerta é enviado automaticamente para todos os e-mails abaixo.
+      </p>
+      <form className="catalog-form" onSubmit={handleAdd}>
+        <input
+          type="email"
+          placeholder="Ex: auditoria@empresa.com"
+          value={newEmail}
+          onChange={(event) => setNewEmail(event.target.value)}
+          required
+        />
+        <button className="primary" type="submit" disabled={busy}>
+          <Plus size={18} />
+          Cadastrar
+        </button>
+      </form>
+      {message && <p className={message.type === "error" ? "text-danger" : "muted"}>{message.text}</p>}
+      <div className="catalog-list">
+        {emails.length === 0 ? (
+          <small className="muted">Nenhum e-mail cadastrado — os alertas automáticos não serão enviados.</small>
+        ) : (
+          emails.map((item) => (
+            <span key={item.id} className="notification-email-pill">
+              {item.email}
+              <button type="button" className="ghost icon-button" title="Remover" onClick={() => handleRemove(item)}>
+                <Trash2 size={14} />
+              </button>
+            </span>
+          ))
+        )}
+      </div>
+    </section>
+  );
+}
+
+const occurrenceErrorLabels = {
+  divergencia_double_check: "Divergência no double check",
+  assinatura_incorreta: "Assinatura apontada como incorreta",
+  two_incorrect_attempts: "Tentativas incorretas"
+};
+
+function occurrenceErrorLabel(value) {
+  return occurrenceErrorLabels[value] ?? value ?? "-";
+}
+
+function formatKeyCount(value) {
+  if (value === null || value === undefined) return null;
+  return `${value} ${Number(value) === 1 ? "chave" : "chaves"}`;
+}
+
+// Quem foi o 1º e o 2º assinante em cada tentativa incorreta, e quantas chaves cada um informou
+// (as quantidades só chegam da API para o admin).
+function SignatureAttemptsHistory({ attempts }) {
+  if (!attempts || attempts.length === 0) {
+    return <small className="muted">Sem histórico detalhado das tentativas (ocorrência registrada antes desta funcionalidade).</small>;
+  }
+
+  const showKeys = attempts.some((a) => a.first_key_count !== null || a.second_key_count !== null);
+  const keys = (value) => formatKeyCount(value) ?? "—";
+
+  return (
+    <div className="occ-attempts-history">
+      <span className="occ-attempts-title">
+        <History size={13} /> Histórico das tentativas incorretas
+      </span>
+      <table className="occ-attempts-table">
+        <thead>
+          <tr>
+            <th>Tentativa</th>
+            <th>Data / Hora</th>
+            <th>1º assinante</th>
+            {showKeys && <th>Chaves</th>}
+            <th>2º assinante</th>
+            {showKeys && <th>Chaves</th>}
+            <th>Observação</th>
+          </tr>
+        </thead>
+        <tbody>
+          {attempts.map((attempt) => (
+            <tr key={attempt.id}>
+              <td><strong>{attempt.attempt_number}ª</strong></td>
+              <td>{formatDateTime(attempt.created_at)}</td>
+              <td><strong>{attempt.first_signer_name || "—"}</strong></td>
+              {showKeys && <td><span className="occ-attempt-keys">{keys(attempt.first_key_count)}</span></td>}
+              <td><strong>{attempt.second_signer_name || "—"}</strong></td>
+              {showKeys && <td><span className="occ-attempt-keys">{keys(attempt.second_key_count)}</span></td>}
+              <td className="muted">
+                {attempt.error_type === "assinatura_incorreta"
+                  ? `Apontada por ${attempt.reported_by_name || "—"}${attempt.reason ? ` — ${attempt.reason}` : ""}`
+                  : "Quantidades divergentes"}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function OccurrencesPanel({ api, onSelectOrder, isAdmin = false }) {
   const [occurrences, setOccurrences] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -1936,6 +2098,8 @@ function OccurrencesPanel({ api, onSelectOrder }) {
           <span>Atualizar</span>
         </button>
       </div>
+
+      {isAdmin && <NotificationEmailsCard api={api} />}
 
       {notificationMsg && (
         <div className={`notification-banner ${notificationMsg.type || "info"}`}>
@@ -2040,7 +2204,8 @@ function OccurrencesPanel({ api, onSelectOrder }) {
             </thead>
             <tbody>
               {filtered.map((occ) => (
-                <tr key={occ.id} className={`occ-row ${occ.status}`}>
+                <React.Fragment key={occ.id}>
+                <tr className={`occ-row occ-row-main ${occ.status}`}>
                   <td className="occ-cell-os">
                     <button
                       type="button"
@@ -2060,7 +2225,7 @@ function OccurrencesPanel({ api, onSelectOrder }) {
                     <strong>{occ.user_name}</strong>
                   </td>
                   <td className="occ-cell-desc">
-                    <span className="occ-error-type-tag">{occ.error_type}</span>
+                    <span className="occ-error-type-tag">{occurrenceErrorLabel(occ.error_type)}</span>
                     <p className="occ-desc-text">{occ.description}</p>
                   </td>
                   <td className="occ-cell-attempts">
@@ -2103,6 +2268,12 @@ function OccurrencesPanel({ api, onSelectOrder }) {
                     )}
                   </td>
                 </tr>
+                <tr className={`occ-history-row ${occ.status}`}>
+                  <td colSpan={7}>
+                    <SignatureAttemptsHistory attempts={occ.attempts} />
+                  </td>
+                </tr>
+                </React.Fragment>
               ))}
             </tbody>
           </table>
@@ -2136,7 +2307,7 @@ function OccurrencesPanel({ api, onSelectOrder }) {
                   onChange={(e) => setEmailRecipient(e.target.value)}
                 />
                 <small className="muted">
-                  Deixe em branco para usar o destinatário padrão configurado no sistema.
+                  Deixe em branco para enviar a todos os e-mails cadastrados para notificações.
                 </small>
               </div>
 
@@ -2156,7 +2327,7 @@ function OccurrencesPanel({ api, onSelectOrder }) {
                   <hr />
                   <p><strong>Ordem de Serviço:</strong> {selectedForEmail.order_code}</p>
                   <p><strong>Usuário Envolvido:</strong> {selectedForEmail.user_name}</p>
-                  <p><strong>Tipo de Erro:</strong> {selectedForEmail.error_type}</p>
+                  <p><strong>Tipo de Erro:</strong> {occurrenceErrorLabel(selectedForEmail.error_type)}</p>
                   <p><strong>Tentativas:</strong> {selectedForEmail.attempt_count}</p>
                   <p><strong>Descrição:</strong> {selectedForEmail.description}</p>
                   <p><strong>Data/Hora:</strong> {formatDateTime(selectedForEmail.created_at)}</p>
@@ -2302,11 +2473,8 @@ function UserOrdersPanel({
   initialFilter = "pendente_validacao"
 }) {
   const [period, setPeriod] = useState("all");
-  const [startDate, setStartDate] = useState(() => {
-    const d = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000);
-    return d.toISOString().slice(0, 10);
-  });
-  const [endDate, setEndDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [startDate, setStartDate] = useState(() => addDaysToKey(todayKey(), -6));
+  const [endDate, setEndDate] = useState(() => todayKey());
   const [appliedCustomDates, setAppliedCustomDates] = useState({ start: startDate, end: endDate });
   const [filter, setFilter] = useState(initialFilter || "pendente_validacao");
 
@@ -2506,6 +2674,7 @@ function AdminConsole({
       {activeMenu === "occurrences" ? (
         <OccurrencesPanel
           api={api}
+          isAdmin
           onSelectOrder={(orderId) => {
             const found = orders.find((o) => o.id === orderId);
             if (found) {
@@ -2577,11 +2746,8 @@ function AdminOrdersPanel({
   initialStatusFilter = "total"
 }) {
   const [period, setPeriod] = useState("all");
-  const [startDate, setStartDate] = useState(() => {
-    const d = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000);
-    return d.toISOString().slice(0, 10);
-  });
-  const [endDate, setEndDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [startDate, setStartDate] = useState(() => addDaysToKey(todayKey(), -6));
+  const [endDate, setEndDate] = useState(() => todayKey());
   const [appliedCustomDates, setAppliedCustomDates] = useState({ start: startDate, end: endDate });
   const [statusFilter, setStatusFilter] = useState(initialStatusFilter || "total");
   const [orderSearch, setOrderSearch] = useState("");
@@ -2778,7 +2944,7 @@ function AdminOrdersPanel({
               <div className="modal-warning-box">
                 <AlertTriangle size={18} style={{ flexShrink: 0 }} />
                 <span>
-                  Todos os itens associados, assinaturas, divergências e registros de auditoria serão removidos. A sequência anual de OS será reiniciada a partir do #0001.
+                  Todos os itens associados, assinaturas, divergências e registros de auditoria serão removidos. A sequência anual de OS será reiniciada a partir do #01.
                 </span>
               </div>
             </div>
@@ -2908,11 +3074,11 @@ function AdminItemsPanel({
           <Plus size={18} />
           <h3>Part Numbers por Modelo</h3>
         </div>
-        <form className="catalog-form" onSubmit={(event) => onCreateCatalogItem("part-numbers", event)}>
+        <form className="catalog-form catalog-form-three" onSubmit={(event) => onCreateCatalogItem("part-numbers", event)}>
           <select
             value={newPartNumberItem?.modelName || (catalog.terminalModels[0]?.name ?? "")}
             onChange={(e) => updatePartNumber("modelName", e.target.value)}
-            style={{ minWidth: "120px" }}
+            aria-label="Modelo"
           >
             {catalog.terminalModels.map((model) => (
               <option key={model.id} value={model.name}>{model.name}</option>
@@ -2929,14 +3095,31 @@ function AdminItemsPanel({
             Incluir
           </button>
         </form>
-        <div className="catalog-list">
-          {(catalog.partNumbers ?? []).map((pn) => (
-            <span key={pn.id}><strong>{pn.model_name || pn.terminal_model_name}</strong>: {pn.part_number}</span>
+        <div className="part-number-groups">
+          {groupPartNumbersByModel(catalog.partNumbers ?? []).map(([model, list]) => (
+            <div key={model} className="part-number-group">
+              <strong>{model}</strong>
+              <div className="catalog-list">
+                {list.map((pn) => (
+                  <span key={pn.id}>{pn.part_number}</span>
+                ))}
+              </div>
+            </div>
           ))}
         </div>
       </section>
     </section>
   );
+}
+
+function groupPartNumbersByModel(partNumbers) {
+  const groups = new Map();
+  for (const pn of partNumbers) {
+    const model = pn.model_name || pn.terminal_model_name || "-";
+    if (!groups.has(model)) groups.set(model, []);
+    groups.get(model).push(pn);
+  }
+  return [...groups.entries()];
 }
 
 function CatalogCard({ title, value, placeholder, items, onChange, onSubmit }) {
@@ -3761,16 +3944,6 @@ function AdminPanel({ users, currentUserId, newUser, setNewUser, onSubmit, onUpd
   );
 }
 
-function tomorrow() {
-  const date = new Date();
-  date.setDate(date.getDate() + 1);
-  return date;
-}
-
-function today() {
-  return new Date();
-}
-
 function typeLabel(value) {
   return orderTypeOptions.find((option) => option.value === value)?.label ?? value ?? "-";
 }
@@ -3824,35 +3997,30 @@ function orderValidationHint(order) {
   return "Sem pendencia ativa";
 }
 
-function formatPeriodRange(period, customStart, customEnd) {
-  const now = new Date();
-  let start;
-  let end;
+// Intervalo [início, fim] em datas "AAAA-MM-DD" do calendário de Brasília,
+// tomando como "hoje" a hora oficial obtida pela rede.
+function periodDateKeys(period, customStart, customEnd) {
+  const today = todayKey();
 
-  if (period === "all" || !period) return "Todas as datas";
-  if (period === "today") {
-    start = now;
-    end = now;
-  } else if (period === "7d") {
-    start = new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000);
-    end = now;
-  } else if (period === "30d") {
-    start = new Date(now.getTime() - 29 * 24 * 60 * 60 * 1000);
-    end = now;
-  } else if (period === "month") {
-    start = new Date(now.getFullYear(), now.getMonth(), 1);
-    end = now;
-  } else if (period === "custom") {
-    if (customStart && customEnd) {
-      const s = customStart.split("-").reverse().join("/");
-      const e = customEnd.split("-").reverse().join("/");
-      return `${s} até ${e}`;
-    }
-    return "Personalizado";
+  if (period === "today") return [today, today];
+  if (period === "7d") return [addDaysToKey(today, -6), today];
+  if (period === "30d") return [addDaysToKey(today, -29), today];
+  if (period === "month") return [`${today.slice(0, 7)}-01`, today];
+  if (period === "custom") {
+    const start = customStart || addDaysToKey(today, -6);
+    const end = customEnd || today;
+    return start > end ? [end, start] : [start, end];
   }
+  return null;
+}
 
-  const fmt = (d) => `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}/${d.getFullYear()}`;
-  return `${fmt(start)} até ${fmt(end)}`;
+function formatPeriodRange(period, customStart, customEnd) {
+  if (period === "all" || !period) return "Todas as datas";
+  if (period === "custom" && !(customStart && customEnd)) return "Personalizado";
+
+  const range = periodDateKeys(period, customStart, customEnd);
+  if (!range) return "Todas as datas";
+  return `${keyToBr(range[0])} até ${keyToBr(range[1])}`;
 }
 
 function orderMatchesPeriod(order, period, startDate, endDate) {
@@ -3863,47 +4031,11 @@ function orderMatchesPeriod(order, period, startDate, endDate) {
   const orderDate = new Date(rawDate);
   if (isNaN(orderDate.getTime())) return true;
 
-  const now = new Date();
-  let start;
-  let end;
+  const range = periodDateKeys(period, startDate, endDate);
+  if (!range) return true;
 
-  if (period === "today") {
-    start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-    end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
-  } else if (period === "7d") {
-    start = new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000);
-    start.setHours(0, 0, 0, 0);
-    end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
-  } else if (period === "30d") {
-    start = new Date(now.getTime() - 29 * 24 * 60 * 60 * 1000);
-    start.setHours(0, 0, 0, 0);
-    end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
-  } else if (period === "month") {
-    start = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
-    end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
-  } else if (period === "custom") {
-    if (startDate) {
-      start = new Date(`${startDate}T00:00:00`);
-    } else {
-      start = new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000);
-      start.setHours(0, 0, 0, 0);
-    }
-    if (endDate) {
-      end = new Date(`${endDate}T23:59:59.999`);
-    } else {
-      end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
-    }
-    if (start.getTime() > end.getTime()) {
-      const temp = start;
-      start = end;
-      end = temp;
-    }
-  } else {
-    return true;
-  }
-
-  const time = orderDate.getTime();
-  return time >= start.getTime() && time <= end.getTime();
+  const orderKey = brasiliaDateKey(orderDate);
+  return orderKey >= range[0] && orderKey <= range[1];
 }
 
 function userOrderMatchesFilter(order, filter) {
@@ -4027,7 +4159,7 @@ function exportOrdersToExcel(ordersToExport, scope) {
   const link = document.createElement("a");
 
   link.href = url;
-  link.download = `ordens-servico-${scope}-${new Date().toISOString().slice(0, 10)}.xls`;
+  link.download = `ordens-servico-${scope}-${todayKey()}.xls`;
   document.body.appendChild(link);
   link.click();
   link.remove();
@@ -4082,7 +4214,13 @@ function formatDate(value) {
 
 function formatDateTime(value) {
   if (!value) return "-";
-  return new Intl.DateTimeFormat("pt-BR", { dateStyle: "short", timeStyle: "short" }).format(new Date(value));
+  return new Intl.DateTimeFormat("pt-BR", { dateStyle: "short", timeStyle: "short", timeZone: BRASILIA_TIMEZONE }).format(new Date(value));
 }
 
-createRoot(document.getElementById("root")).render(<App />);
+// Só renderiza depois de obter a hora oficial (com limite de espera, para não travar a tela).
+Promise.race([syncOfficialTime(), new Promise((resolve) => setTimeout(resolve, 5000))])
+  .catch((error) => console.error("[Hora oficial]", error.message))
+  .finally(() => {
+    startOfficialTimeSync();
+    createRoot(document.getElementById("root")).render(<App />);
+  });

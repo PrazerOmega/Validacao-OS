@@ -296,3 +296,33 @@ EXCEPTION WHEN duplicate_object THEN null; END $$;
 
 -- Acessórios que o Estoque confirmou que acompanham cada linha de terminal
 ALTER TABLE order_items ADD COLUMN IF NOT EXISTS stock_accessories TEXT[];
+
+-- E-mails cadastrados pelo admin que recebem automaticamente os alertas de ocorrências
+CREATE TABLE IF NOT EXISTS notification_emails (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  email TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_notification_emails_email ON notification_emails(LOWER(email));
+
+-- Histórico de cada tentativa incorreta de assinatura: quem foi o 1º e o 2º assinante
+-- e quantas chaves cada um informou. As quantidades só são exibidas para administradores.
+CREATE TABLE IF NOT EXISTS signature_attempts (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  service_order_id UUID NOT NULL REFERENCES service_orders(id) ON DELETE CASCADE,
+  attempt_number INTEGER NOT NULL,
+  error_type TEXT NOT NULL,
+  first_signer_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  first_signer_name TEXT,
+  first_key_count INTEGER,
+  second_signer_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  second_signer_name TEXT,
+  second_key_count INTEGER,
+  reported_by_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  reported_by_name TEXT,
+  reason TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_signature_attempts_order ON signature_attempts(service_order_id, attempt_number);

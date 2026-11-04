@@ -2,6 +2,7 @@
  * Serviço de preparação e formatação de e-mails para ocorrências de assinaturas incorretas.
  * Respeita a regra de não expor informações confidenciais ou inventar credenciais.
  */
+import { BRASILIA_TIMEZONE, networkNow } from "../utils/networkTime.js";
 
 export function isEmailConfigured() {
   return Boolean(
@@ -23,10 +24,13 @@ function escapeHtml(value) {
 
 export function formatOccurrenceEmail(occurrence, order = {}) {
   const code = order.code || occurrence.order_code || "N/A";
-  const dateFormatted = new Intl.DateTimeFormat("pt-BR", {
-    dateStyle: "short",
-    timeStyle: "medium"
-  }).format(new Date(occurrence.created_at || Date.now()));
+  const dateFormatted = occurrence.created_at
+    ? new Intl.DateTimeFormat("pt-BR", {
+        dateStyle: "short",
+        timeStyle: "medium",
+        timeZone: BRASILIA_TIMEZONE
+      }).format(new Date(occurrence.created_at))
+    : "N/A";
 
   const subject = `[Validação de OS] Alerta: ${occurrence.attempt_count}ª Tentativa Incorreta de Assinatura - OS ${code}`;
 
@@ -132,7 +136,7 @@ export function parseRecipients(raw) {
     .split(/[,;]/)
     .map((item) => item.trim())
     .filter(Boolean);
-  if (list.length > 10) return null;
+  if (list.length > 30) return null;
   return list.every((item) => EMAIL_REGEX.test(item)) ? list : null;
 }
 
@@ -156,7 +160,7 @@ async function getTransporter() {
 
 /**
  * Envia (ou apenas prepara, se o SMTP não estiver configurado) o e-mail de uma ocorrência.
- * Nunca inventa destinatários: usa o informado ou NOTIFICATION_EMAIL.
+ * Nunca inventa destinatários: usa os informados (ou cadastrados pelo admin) ou NOTIFICATION_EMAIL.
  * Só retorna success=true quando o servidor SMTP aceitou a mensagem.
  */
 export async function sendOccurrenceEmail({ occurrence, order = {}, recipient }) {
@@ -178,7 +182,7 @@ export async function sendOccurrenceEmail({ occurrence, order = {}, recipient })
       success: false,
       configured: isEmailConfigured(),
       errorCode: "missing_recipient",
-      reason: "Nenhum destinatário informado e NOTIFICATION_EMAIL não está configurado.",
+      reason: "Nenhum destinatário informado e nenhum e-mail cadastrado para notificações (aba Ocorrências do Admin).",
       preview: { to: null, subject, bodyText }
     };
   }
@@ -212,7 +216,7 @@ export async function sendOccurrenceEmail({ occurrence, order = {}, recipient })
       recipient: to,
       subject,
       messageId: info.messageId,
-      sentAt: new Date().toISOString()
+      sentAt: (await networkNow()).toISOString()
     };
   } catch (error) {
     console.error("[EmailService] Falha ao enviar e-mail de ocorrência:", error.message);

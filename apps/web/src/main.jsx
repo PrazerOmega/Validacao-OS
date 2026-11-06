@@ -2511,7 +2511,6 @@ function UserOrdersPanel({
       statuses: [{ value: "signed", label: "Aprovadas" }]
     }
   ];
-  const allStatuses = areaOptions.flatMap((area) => area.statuses);
   const areaOfFilter = (value) => areaOptions.find((area) => area.statuses.some((s) => s.value === value))?.value ?? "all";
 
   const [area, setArea] = useState(() => areaOfFilter(initialFilter || "pendente_validacao"));
@@ -2524,11 +2523,15 @@ function UserOrdersPanel({
   }, [initialFilter]);
 
   const currentArea = areaOptions.find((option) => option.value === area);
-  const statusesInArea = currentArea ? currentArea.statuses : allStatuses;
-  const statusSelectOptions = statusesInArea.map((status) => ({ ...status, count: countFor([status.value]) }));
+  // Status só pode ser escolhido depois de definir uma Área
+  const statusEnabled = Boolean(currentArea);
+  const effectiveFilter = statusEnabled ? filter : "todas";
+  const statusSelectOptions = statusEnabled
+    ? currentArea.statuses.map((status) => ({ ...status, count: countFor([status.value]) }))
+    : [];
 
   const filteredOrders = searchedOrders.filter((order) => {
-    if (filter !== "todas") return userOrderMatchesFilter(order, filter);
+    if (effectiveFilter !== "todas") return userOrderMatchesFilter(order, effectiveFilter);
     if (!currentArea) return true;
     return currentArea.statuses.some((status) => userOrderMatchesFilter(order, status.value));
   });
@@ -2655,9 +2658,14 @@ function UserOrdersPanel({
             </label>
             <label className="orders-select-field">
               <span>Status</span>
-              <select value={filter} onChange={(event) => setFilter(event.target.value)}>
+              <select
+                value={effectiveFilter}
+                onChange={(event) => setFilter(event.target.value)}
+                disabled={!statusEnabled}
+                title={statusEnabled ? undefined : "Selecione uma área para filtrar por status"}
+              >
                 <option value="todas">
-                  Todos os status
+                  {statusEnabled ? "Todos os status" : "Selecione uma área primeiro"}
                 </option>
                 {statusSelectOptions.map((option) => (
                   <option key={option.value} value={option.value}>

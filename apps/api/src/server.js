@@ -17,8 +17,16 @@ import {
   startNetworkTimeSync
 } from "./utils/networkTime.js";
 
+// Sem o segredo do JWT nenhum login funciona: falha cedo e com mensagem clara.
+if (!process.env.JWT_SECRET) {
+  console.error("JWT_SECRET não definido. Copie apps/api/.env.example para apps/api/.env e configure-o.");
+  process.exit(1);
+}
+
 const app = express();
 const port = Number(process.env.PORT ?? 3333);
+
+app.disable("x-powered-by");
 
 const rawCorsOrigin = process.env.CORS_ORIGIN;
 

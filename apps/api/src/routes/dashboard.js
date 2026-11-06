@@ -1,5 +1,6 @@
 import express from "express";
 import { query } from "../db/pool.js";
+import { BRASILIA_TIMEZONE } from "../utils/networkTime.js";
 
 export const dashboardRouter = express.Router();
 
@@ -55,16 +56,21 @@ dashboardRouter.get("/", async (req, res) => {
 
     // 1. Gráfico de notas / ordens de serviço realizadas por período
     const periodParams = userRole === "requester" ? [userId] : [];
+    // Últimos 14 dias com ordens concluídas, agrupados pelo dia no calendário de Brasília
+    // (o banco roda em UTC) e devolvidos em ordem cronológica.
     const periodSql = `
-      SELECT
-        TO_CHAR(DATE(updated_at), 'YYYY-MM-DD') AS date,
-        TO_CHAR(DATE(updated_at), 'DD/MM') AS label,
-        COUNT(*)::int AS count
-      FROM service_orders
-      ${userRole === "requester" ? "WHERE requester_id = $1 AND status = 'signed'" : "WHERE status = 'signed'"}
-      GROUP BY DATE(updated_at)
-      ORDER BY DATE(updated_at) ASC
-      LIMIT 14
+      SELECT TO_CHAR(day, 'YYYY-MM-DD') AS date, TO_CHAR(day, 'DD/MM') AS label, count
+      FROM (
+        SELECT
+          DATE(updated_at AT TIME ZONE '${BRASILIA_TIMEZONE}') AS day,
+          COUNT(*)::int AS count
+        FROM service_orders
+        ${userRole === "requester" ? "WHERE requester_id = $1 AND status = 'signed'" : "WHERE status = 'signed'"}
+        GROUP BY day
+        ORDER BY day DESC
+        LIMIT 14
+      ) recent
+      ORDER BY day ASC
     `;
 
     // 2. Gráfico de assinaturas reais realizadas por pessoa (com nome padronizado de users)

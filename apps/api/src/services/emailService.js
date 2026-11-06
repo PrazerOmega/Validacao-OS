@@ -91,7 +91,7 @@ Nenhum dado confidencial, senha ou chave privada é exposto neste e-mail.
         </tr>
         <tr>
           <td class="label">Data e Hora</td>
-          <td class="val">${dateFormatted}</td>
+          <td class="val">${escapeHtml(dateFormatted)}</td>
         </tr>
         <tr>
           <td class="label">Usuário Envolvido</td>
@@ -125,6 +125,7 @@ Nenhum dado confidencial, senha ou chave privada é exposto neste e-mail.
 }
 
 const EMAIL_REGEX = /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/;
+export const MAX_RECIPIENTS = 30;
 
 /**
  * Normaliza e valida uma lista de destinatários separada por vírgula/ponto e vírgula.
@@ -136,7 +137,7 @@ export function parseRecipients(raw) {
     .split(/[,;]/)
     .map((item) => item.trim())
     .filter(Boolean);
-  if (list.length > 30) return null;
+  if (list.length > MAX_RECIPIENTS) return null;
   return list.every((item) => EMAIL_REGEX.test(item)) ? list : null;
 }
 
@@ -216,7 +217,8 @@ export async function sendOccurrenceEmail({ occurrence, order = {}, recipient })
       recipient: to,
       subject,
       messageId: info.messageId,
-      sentAt: (await networkNow()).toISOString()
+      sentAt: (await networkNow()).toISOString(),
+      preview: { to, subject, bodyText }
     };
   } catch (error) {
     console.error("[EmailService] Falha ao enviar e-mail de ocorrência:", error.message);
@@ -226,7 +228,8 @@ export async function sendOccurrenceEmail({ occurrence, order = {}, recipient })
       errorCode: "send_failed",
       recipient: to,
       subject,
-      reason: "Falha ao enviar o e-mail pelo servidor SMTP. Verifique as configurações e tente novamente."
+      reason: "Falha ao enviar o e-mail pelo servidor SMTP. Verifique as configurações e tente novamente.",
+      preview: { to, subject, bodyText }
     };
   }
 }

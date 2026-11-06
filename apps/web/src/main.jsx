@@ -12,7 +12,6 @@ import {
   Clock3,
   Cpu,
   Edit3,
-  ExternalLink,
   FileSignature,
   History,
   Inbox,
@@ -28,7 +27,6 @@ import {
   ShieldCheck,
   Sun,
   Trash2,
-  TrendingUp,
   UserCheck,
   Users,
   UserPlus,
@@ -73,8 +71,6 @@ const statusIcons = {
   stock_picking: Activity,
   stock_returned: AlertTriangle
 };
-
-const STOCK_STATUSES = ["awaiting_stock_check", "stock_checking", "stock_picking", "stock_returned"];
 
 // Acessórios que o Estoque marca como enviados junto do terminal; requestedBy indica o que a OS pediu
 const stockAccessoryOptions = [
@@ -167,19 +163,26 @@ function createEmptyOrder(userName = "") {
 }
 
 function useApi(session, onUnauthorized) {
+  // O callback fica em uma ref para que o objeto `api` só mude quando o token mudar.
+  // Sem isso, cada render do App criaria um novo `api` e dispararia novamente todos
+  // os efeitos que dependem dele (painéis refazendo requisições a cada render).
+  const onUnauthorizedRef = useRef(onUnauthorized);
+  onUnauthorizedRef.current = onUnauthorized;
+  const token = session?.token;
+
   return useMemo(() => {
     async function request(path, options = {}) {
       const response = await fetch(`${API_URL}${path}`, {
         ...options,
         headers: {
           "Content-Type": "application/json",
-          ...(session?.token ? { Authorization: `Bearer ${session.token}` } : {}),
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
           ...options.headers
         }
       });
 
       if (response.status === 401) {
-        onUnauthorized();
+        onUnauthorizedRef.current?.();
       }
 
       const data = await response.json().catch(() => null);
@@ -192,7 +195,7 @@ function useApi(session, onUnauthorized) {
     }
 
     return { request };
-  }, [session, onUnauthorized]);
+  }, [token]);
 }
 
 function ThemeToggle({ theme, onToggle }) {
@@ -221,8 +224,9 @@ function ThemeToggle({ theme, onToggle }) {
 }
 
 function Login({ onLogin, theme, onToggleTheme }) {
-  const [email, setEmail] = useState("solicitante@empresa.com");
-  const [password, setPassword] = useState("123456");
+  // Credenciais de demonstração só vêm preenchidas em desenvolvimento, nunca no build de produção
+  const [email, setEmail] = useState(import.meta.env.DEV ? "solicitante@empresa.com" : "");
+  const [password, setPassword] = useState(import.meta.env.DEV ? "123456" : "");
   const [error, setError] = useState("");
 
   async function submit(event) {
@@ -235,10 +239,10 @@ function Login({ onLogin, theme, onToggleTheme }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password })
       });
-      const data = await response.json();
+      const data = await response.json().catch(() => null);
 
-      if (!response.ok) {
-        throw new Error(data.message);
+      if (!response.ok || !data) {
+        throw new Error(data?.message ?? "Falha no login. Tente novamente.");
       }
 
       onLogin(data);
@@ -256,7 +260,6 @@ function Login({ onLogin, theme, onToggleTheme }) {
         <div>
           <p className="eyebrow">Controle de autorizações</p>
           <h1>Ordens de Serviço</h1>
-          <p className="muted"></p>
         </div>
         <form onSubmit={submit} className="stack">
           <label>
@@ -282,6 +285,22 @@ const realtimeSyncChannel = typeof window !== "undefined" && "BroadcastChannel" 
   ? new BroadcastChannel("validacao_os_sync")
   : null;
 
+// Executa uma ação cuja mensagem de erro já é exibida por quem a implementa (ex.: runOrderAction),
+// evitando que a rejeição vaze como "Uncaught (in promise)" no console.
+function runHandled(action, ...args) {
+  return Promise.resolve()
+    .then(() => action?.(...args))
+    .catch(() => {});
+}
+
+// Elementos com role="button" devem responder a Enter e Espaço, como um botão nativo
+function activateOnKey(event, action) {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    action();
+  }
+}
+
 function notifyRealtimeSync() {
   if (realtimeSyncChannel) {
     try {
@@ -293,8 +312,14 @@ function notifyRealtimeSync() {
 function App() {
   const [theme, setTheme] = useState(() => localStorage.getItem("app_theme") || "light");
   const [session, setSession] = useState(() => {
-    const stored = localStorage.getItem("ordens:session");
-    return stored ? JSON.parse(stored) : null;
+    // Um valor corrompido no armazenamento não pode deixar a aplicação em branco
+    try {
+      const stored = localStorage.getItem("ordens:session");
+      return stored ? JSON.parse(stored) : null;
+    } catch {
+      localStorage.removeItem("ordens:session");
+      return null;
+    }
   });
   const [orders, setOrders] = useState([]);
   const [selected, setSelected] = useState(null);
@@ -316,6 +341,7 @@ function App() {
   const [postSaveModalOrder, setPostSaveModalOrder] = useState(null);
   const [isSubmittingPostSave, setIsSubmittingPostSave] = useState(false);
   const [showUnsavedPrompt, setShowUnsavedPrompt] = useState(false);
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const [pendingNavigation, setPendingNavigation] = useState(null);
   const [executorTab, setExecutorTab] = useState("suporte");
   const [counts, setCounts] = useState({ suporte: 0, producao: 0, unassigned: 0 });
@@ -382,9 +408,16 @@ function App() {
     localStorage.setItem("app_theme", theme);
   }, [theme]);
 
+  // Encerra a sessão imediatamente (também usado quando o token expira, sem confirmação)
   function logout() {
     localStorage.removeItem("ordens:session");
+    setShowLogoutConfirm(false);
     setSession(null);
+  }
+
+  // Clique em "Sair": pede confirmação antes de encerrar a sessão
+  function requestLogout() {
+    setShowLogoutConfirm(true);
   }
 
   function login(data) {
@@ -490,12 +523,16 @@ function App() {
       setSelected(null);
       return;
     }
-    const fullOrder = await api.request(`/orders/${order.id}`);
-    setSelected(fullOrder);
-    if (fullOrder?.executor_team && fullOrder.executor_team !== executorTabRef.current) {
-      setExecutorTab(fullOrder.executor_team);
-      executorTabRef.current = fullOrder.executor_team;
-      await loadData(fullOrder.executor_team);
+    try {
+      const fullOrder = await api.request(`/orders/${order.id}`);
+      setSelected(fullOrder);
+      if (fullOrder?.executor_team && fullOrder.executor_team !== executorTabRef.current) {
+        setExecutorTab(fullOrder.executor_team);
+        executorTabRef.current = fullOrder.executor_team;
+        await loadData(fullOrder.executor_team);
+      }
+    } catch (err) {
+      setMessage(err.message);
     }
   }
 
@@ -568,36 +605,11 @@ function App() {
         return;
       }
 
-      if (!it.packaging || !["CAIXA", "SACO BOLHA"].includes(it.packaging)) {
-        setMessage(`Item ${itemNum}: Selecione a opção obrigatória "Embalagem" (CAIXA ou SACO BOLHA).`);
-        return;
-      }
-      if (!it.battery || !["SIM", "NÃO"].includes(it.battery)) {
-        setMessage(`Item ${itemNum}: Selecione a opção obrigatória "Bateria" (SIM ou NÃO).`);
-        return;
-      }
-      if (!it.terminalOpening || !["SIM", "NÃO"].includes(it.terminalOpening)) {
-        setMessage(`Item ${itemNum}: Selecione a opção obrigatória "Abertura de Terminal" (SIM ou NÃO).`);
-        return;
-      }
-      if (!it.manual || !["SIM", "NÃO"].includes(it.manual)) {
-        setMessage(`Item ${itemNum}: Selecione a opção obrigatória "Manual" (SIM ou NÃO).`);
-        return;
-      }
-      if (!it.charger || !["SIM", "NÃO"].includes(it.charger)) {
-        setMessage(`Item ${itemNum}: Selecione a opção obrigatória "Carregador" (SIM ou NÃO).`);
-        return;
-      }
-      if (!it.minbase || !["SIM", "NÃO"].includes(it.minbase)) {
-        setMessage(`Item ${itemNum}: Selecione a opção obrigatória "Minbase" (SIM ou NÃO).`);
-        return;
-      }
-      if (!it.label || !["SIM", "NÃO"].includes(it.label)) {
-        setMessage(`Item ${itemNum}: Selecione a opção obrigatória "Label" (SIM ou NÃO).`);
-        return;
-      }
-      if (!it.aestheticCover || !["SIM", "NÃO"].includes(it.aestheticCover)) {
-        setMessage(`Item ${itemNum}: Selecione a opção obrigatória "Cobre Estético" (SIM ou NÃO).`);
+      const missingOption = ITEM_MANDATORY_OPTIONS.find((opt) => !opt.choices.includes(it[opt.key]));
+      if (missingOption) {
+        setMessage(
+          `Item ${itemNum}: Selecione a opção obrigatória "${missingOption.label}" (${missingOption.choices.join(" ou ")}).`
+        );
         return;
       }
     }
@@ -804,7 +816,7 @@ function App() {
                 <span>Adicionar item</span>
               </button>
             </nav>
-            <button className="sidebar-btn sidebar-btn-secondary sidebar-logout" onClick={() => safeNavigate(logout)}>
+            <button type="button" className="sidebar-btn sidebar-btn-secondary sidebar-logout" onClick={() => safeNavigate(requestLogout)}>
               <LogOut size={16} />
               <span>Sair</span>
             </button>
@@ -826,7 +838,7 @@ function App() {
               <ClipboardList size={16} />
               <span>Histórico de ordens</span>
             </button>
-            <button className="sidebar-btn sidebar-btn-secondary sidebar-logout" onClick={() => safeNavigate(logout)}>
+            <button type="button" className="sidebar-btn sidebar-btn-secondary sidebar-logout" onClick={() => safeNavigate(requestLogout)}>
               <LogOut size={16} />
               <span>Sair</span>
             </button>
@@ -856,7 +868,7 @@ function App() {
                 <span>Ocorrências</span>
               </button>
             )}
-            <button className="sidebar-btn sidebar-btn-secondary sidebar-logout" onClick={logout}>
+            <button type="button" className="sidebar-btn sidebar-btn-secondary sidebar-logout" onClick={requestLogout}>
               <LogOut size={16} />
               <span>Sair</span>
             </button>
@@ -981,14 +993,10 @@ function App() {
         ) : userMenu === "occurrences" ? (
           <OccurrencesPanel
             api={api}
-            onSelectOrder={async (orderId) => {
+            onSelectOrder={(orderId) => {
               setUserMenu("orders");
-              try {
-                const fullOrder = await api.request(`/orders/${orderId}`);
-                await selectOrder(fullOrder);
-              } catch (err) {
-                console.error("Erro ao carregar ordem da ocorrência:", err);
-              }
+              // selectOrder já busca a ordem completa e troca a aba da equipe
+              selectOrder({ id: orderId });
             }}
           />
         ) : session.user.role === "requester" && userMenu === "create" ? (
@@ -1129,8 +1137,10 @@ function App() {
                     setExecutorTab(targetTeam);
                     executorTabRef.current = targetTeam;
                     await loadData(targetTeam);
-                    if (result?.order) {
-                      await selectOrder(result.order);
+                    // O envio devolve a própria ordem (ou { order } em outras ações)
+                    const submittedOrder = result?.order ?? result;
+                    if (submittedOrder?.id) {
+                      await selectOrder(submittedOrder);
                     }
                     setMessage("Ordem enviada com sucesso para validação.");
                   } catch (err) {
@@ -1202,7 +1212,67 @@ function App() {
           </div>
         </div>
       )}
+
+      {/* Modal 3: Confirmação de saída da conta (todos os perfis) */}
+      {showLogoutConfirm && (
+        <LogoutConfirmDialog
+          userName={session.user.name}
+          onCancel={() => setShowLogoutConfirm(false)}
+          onConfirm={() => {
+            setShowLogoutConfirm(false);
+            logout();
+          }}
+        />
+      )}
     </main>
+  );
+}
+
+function LogoutConfirmDialog({ userName, onCancel, onConfirm }) {
+  // Esc cancela, como em qualquer diálogo
+  useEffect(() => {
+    function handleKeyDown(event) {
+      if (event.key === "Escape") onCancel();
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onCancel]);
+
+  return (
+    <div className="modal-overlay" onClick={onCancel}>
+      <div
+        className="modal-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="logout-confirm-title"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="modal-header">
+          <div className="modal-icon-badge warning">
+            <LogOut size={22} />
+          </div>
+          <div>
+            <h3 id="logout-confirm-title">Sair da conta</h3>
+            <p className="modal-subtitle">Você precisará entrar novamente para continuar.</p>
+          </div>
+        </div>
+        <div className="modal-body">
+          <p>
+            Tem certeza que deseja sair da conta <strong>{userName}</strong>?
+          </p>
+        </div>
+        <div className="modal-actions">
+          {/* Foco inicial em Cancelar: um Enter acidental não encerra a sessão */}
+          <button type="button" className="ghost" onClick={onCancel} autoFocus>
+            Cancelar
+          </button>
+          <button type="button" className="danger" onClick={onConfirm}>
+            <LogOut size={16} />
+            Sair
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -1513,7 +1583,7 @@ function DashboardMetricCard({ title, value, icon, variant = "neutral", onClick 
       onClick={onClick}
       role={onClick ? "button" : undefined}
       tabIndex={onClick ? 0 : undefined}
-      onKeyDown={onClick ? (e) => e.key === "Enter" && onClick() : undefined}
+      onKeyDown={onClick ? (e) => activateOnKey(e, onClick) : undefined}
       title={onClick ? `Ver ordens: ${title}` : undefined}
     >
       <div className="metric-card-top">
@@ -2098,19 +2168,19 @@ function OccurrencesPanel({ api, onSelectOrder, isAdmin = false }) {
       )}
 
       <div className="occurrences-summary-grid">
-        <div className={`occ-summary-card total ${filterStatus === "all" ? "active" : ""}`} onClick={() => setFilterStatus("all")}>
+        <div className={`occ-summary-card total ${filterStatus === "all" ? "active" : ""}`} role="button" tabIndex={0} aria-pressed={filterStatus === "all"} onClick={() => setFilterStatus("all")} onKeyDown={(e) => activateOnKey(e, () => setFilterStatus("all"))}>
           <span className="occ-summary-label">Total de Ocorrências</span>
           <strong className="occ-summary-value">{occurrences.length}</strong>
         </div>
-        <div className={`occ-summary-card pending ${filterStatus === "pending" ? "active" : ""}`} onClick={() => setFilterStatus("pending")}>
+        <div className={`occ-summary-card pending ${filterStatus === "pending" ? "active" : ""}`} role="button" tabIndex={0} aria-pressed={filterStatus === "pending"} onClick={() => setFilterStatus("pending")} onKeyDown={(e) => activateOnKey(e, () => setFilterStatus("pending"))}>
           <span className="occ-summary-label">Pendentes de Ação</span>
           <strong className="occ-summary-value text-warning">{pendingCount}</strong>
         </div>
-        <div className={`occ-summary-card sent ${filterStatus === "email_sent" ? "active" : ""}`} onClick={() => setFilterStatus("email_sent")}>
+        <div className={`occ-summary-card sent ${filterStatus === "email_sent" ? "active" : ""}`} role="button" tabIndex={0} aria-pressed={filterStatus === "email_sent"} onClick={() => setFilterStatus("email_sent")} onKeyDown={(e) => activateOnKey(e, () => setFilterStatus("email_sent"))}>
           <span className="occ-summary-label">Notificadas por E-mail</span>
           <strong className="occ-summary-value text-info">{sentCount}</strong>
         </div>
-        <div className={`occ-summary-card resolved ${filterStatus === "resolved" ? "active" : ""}`} onClick={() => setFilterStatus("resolved")}>
+        <div className={`occ-summary-card resolved ${filterStatus === "resolved" ? "active" : ""}`} role="button" tabIndex={0} aria-pressed={filterStatus === "resolved"} onClick={() => setFilterStatus("resolved")} onKeyDown={(e) => activateOnKey(e, () => setFilterStatus("resolved"))}>
           <span className="occ-summary-label">Resolvidas</span>
           <strong className="occ-summary-value text-success">{resolvedCount}</strong>
         </div>
@@ -2341,88 +2411,6 @@ function OccurrencesPanel({ api, onSelectOrder, isAdmin = false }) {
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-function PeriodFilterControl({
-  period,
-  onPeriodChange,
-  startDate,
-  onStartDateChange,
-  endDate,
-  onEndDateChange,
-  onApplyCustom
-}) {
-  const periodButtons = [
-    { value: "all", label: "Todas" },
-    { value: "today", label: "Hoje" },
-    { value: "7d", label: "Últimos 7 dias" },
-    { value: "30d", label: "Últimos 30 dias" },
-    { value: "month", label: "Este mês" },
-    { value: "custom", label: "Personalizado" }
-  ];
-
-  return (
-    <div className="orders-period-filter-wrapper">
-      <div className="orders-period-filter-header">
-        <span className="filter-label">
-          <Calendar size={14} />
-          <span>Período</span>
-        </span>
-        <span className="period-range-indicator">
-          {formatPeriodRange(period, startDate, endDate)}
-        </span>
-      </div>
-
-      <div className="orders-period-controls">
-        <div className="dashboard-period-tabs" role="tablist">
-          {periodButtons.map((btn) => (
-            <button
-              key={btn.value}
-              type="button"
-              role="tab"
-              aria-selected={period === btn.value}
-              className={`period-tab-btn ${period === btn.value ? "active" : ""}`}
-              onClick={() => onPeriodChange(btn.value)}
-            >
-              {btn.label}
-            </button>
-          ))}
-        </div>
-
-        {period === "custom" && (
-          <div className="dashboard-custom-dates">
-            <label className="date-picker-label">
-              <span>De:</span>
-              <input
-                type="date"
-                value={startDate}
-                onChange={(e) => onStartDateChange(e.target.value)}
-                className="dashboard-date-input"
-              />
-            </label>
-            <label className="date-picker-label">
-              <span>Até:</span>
-              <input
-                type="date"
-                value={endDate}
-                onChange={(e) => onEndDateChange(e.target.value)}
-                className="dashboard-date-input"
-              />
-            </label>
-            {onApplyCustom && (
-              <button
-                type="button"
-                className="dashboard-apply-btn"
-                onClick={onApplyCustom}
-              >
-                Filtrar
-              </button>
-            )}
-          </div>
-        )}
-      </div>
     </div>
   );
 }
@@ -2768,11 +2756,9 @@ function AdminConsole({
           api={api}
           isAdmin
           onSelectOrder={(orderId) => {
-            const found = orders.find((o) => o.id === orderId);
-            if (found) {
-              onSelectOrder(found);
-              onNavigateToOrdersTab && onNavigateToOrdersTab();
-            }
+            // Busca pelo id (e não na lista da aba atual) para abrir ordens de qualquer equipe
+            onSelectOrder({ id: orderId });
+            onNavigateToOrdersTab?.();
           }}
         />
       ) : activeMenu === "users" ? (
@@ -3285,7 +3271,7 @@ function StockCheckPanel({ order, items, onAction }) {
   );
 }
 
-function StockReturnDecisionPanel({ onAction, onEdit }) {
+function StockReturnDecisionPanel({ onAction, onEdit, canEdit = true }) {
   const [decision, setDecision] = useState(null);
   const [justification, setJustification] = useState("");
   const [recheckNote, setRecheckNote] = useState("");
@@ -3314,10 +3300,12 @@ function StockReturnDecisionPanel({ onAction, onEdit }) {
           <RefreshCw size={16} />
           Devolver ao Estoque
         </button>
-        <button type="button" className="ghost" onClick={onEdit}>
-          <Edit3 size={16} />
-          Editar OS
-        </button>
+        {canEdit && (
+          <button type="button" className="ghost" onClick={onEdit}>
+            <Edit3 size={16} />
+            Editar OS
+          </button>
+        )}
       </div>
 
       {decision === "forward" && (
@@ -3630,7 +3618,7 @@ function OrderDetails({
 
       <div className="actions">
         {canSubmit && (
-          <button className="primary" onClick={onSubmit}>
+          <button type="button" className="primary" onClick={() => runHandled(onSubmit)}>
             <Send size={18} />
             Enviar
           </button>
@@ -3649,7 +3637,7 @@ function OrderDetails({
       )}
 
       {canDecideStockReturn && (
-        <StockReturnDecisionPanel key={selected.id} onAction={onOrderAction} onEdit={() => onEdit(selected)} />
+        <StockReturnDecisionPanel key={selected.id} onAction={onOrderAction} onEdit={() => onEdit(selected)} canEdit={allowEdit} />
       )}
 
       {selected.status === "pending_signature" && hasCurrentUserSigned && (
@@ -3719,7 +3707,7 @@ function OrderDetails({
                 type="button"
                 disabled={!keyCount || Number(keyCount) <= 0}
                 onClick={() => {
-                  onSign(keyCount);
+                  runHandled(onSign, keyCount);
                   setValidationDecision(null);
                   setKeyCount("");
                 }}
@@ -3746,7 +3734,7 @@ function OrderDetails({
                 type="button"
                 disabled={!correctionMsg.trim()}
                 onClick={() => {
-                  onCorrection(correctionMsg);
+                  runHandled(onCorrection, correctionMsg);
                   setValidationDecision(null);
                   setCorrectionMsg("");
                 }}
@@ -4176,26 +4164,6 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
-}
-
-function orderSummary(order) {
-  if (!order) return "-";
-
-  if (order.items?.length) {
-    const models = [...new Set(order.items.map((item) => item.terminal_model || item.itemIdentifier || item.item_identifier).filter(Boolean))].join(", ");
-    const pns = [...new Set(order.items.map((item) => item.part_number || item.partNumber).filter(Boolean).filter((pn) => pn !== "-"))].join(", ");
-    const clients = [...new Set(order.items.map((item) => item.client_name || item.clientName).filter(Boolean).filter((c) => c !== "-"))].join(", ");
-    const quantity = order.items.reduce((sum, item) => sum + Number(item.quantity ?? 0), 0);
-
-    return `${models || "-"}${pns ? ` | PN ${pns}` : ""}${clients ? ` | ${clients}` : ""}${quantity > 0 ? ` | Qtd ${quantity}` : ""}`;
-  }
-
-  const models = order.terminal_models || order.item_identifier || "-";
-  const pns = order.part_numbers && order.part_numbers !== "-" ? ` | PN ${order.part_numbers}` : "";
-  const clients = order.client_names && order.client_names !== "-" ? ` | ${order.client_names}` : "";
-  const quantity = order.total_quantity ? ` | Qtd ${order.total_quantity}` : "";
-
-  return `${models}${pns}${clients}${quantity}`;
 }
 
 function formatDate(value) {

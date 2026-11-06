@@ -2,12 +2,14 @@ import express from "express";
 import { z } from "zod";
 import { query } from "../db/pool.js";
 import { requireRole } from "../middleware/auth.js";
+import { MAX_RECIPIENTS } from "../services/emailService.js";
+import { rejectInvalidUuid } from "../utils/validation.js";
 
 // Lista de e-mails que recebem automaticamente os alertas de assinatura incorreta.
 export const notificationsRouter = express.Router();
 
-const MAX_RECIPIENTS = 30;
-const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+notificationsRouter.param("id", rejectInvalidUuid("E-mail não encontrado."));
+
 const emailSchema = z.object({
   email: z.string().trim().toLowerCase().email("Informe um e-mail válido.")
 });
@@ -42,9 +44,6 @@ notificationsRouter.post("/", requireRole("admin"), async (req, res) => {
 });
 
 notificationsRouter.delete("/:id", requireRole("admin"), async (req, res) => {
-  if (!UUID_REGEX.test(req.params.id)) {
-    return res.status(404).json({ message: "E-mail não encontrado." });
-  }
   const { rowCount } = await query("DELETE FROM notification_emails WHERE id = $1", [req.params.id]);
   if (!rowCount) {
     return res.status(404).json({ message: "E-mail não encontrado." });

@@ -3,20 +3,23 @@ import express from "express";
 import { z } from "zod";
 import { query } from "../db/pool.js";
 import { requireRole } from "../middleware/auth.js";
+import { USER_ROLES, rejectInvalidUuid } from "../utils/validation.js";
 
 export const usersRouter = express.Router();
+
+usersRouter.param("id", rejectInvalidUuid("Usuario nao encontrado."));
 
 const userSchema = z.object({
   name: z.string().min(2),
   email: z.string().email(),
   password: z.string().min(6),
-  role: z.enum(["admin", "requester", "signer", "spectator", "stock"])
+  role: z.enum(USER_ROLES)
 });
 
 const userUpdateSchema = z.object({
   name: z.string().min(2).optional(),
   email: z.string().email().optional(),
-  role: z.enum(["admin", "requester", "signer", "spectator", "stock"]).optional(),
+  role: z.enum(USER_ROLES).optional(),
   active: z.boolean().optional()
 });
 

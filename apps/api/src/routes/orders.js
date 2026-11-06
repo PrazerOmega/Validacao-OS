@@ -1,15 +1,26 @@
 import express from "express";
 import { z } from "zod";
-import { pool, query } from "../db/pool.js";
+import { pool, query, withTransaction } from "../db/pool.js";
 import { requireRole } from "../middleware/auth.js";
 import { addOrderEvent } from "../utils/audit.js";
 import { buildSignature } from "../utils/signature.js";
 import { sendOccurrenceEmail } from "../services/emailService.js";
 import { listNotificationEmails } from "./notifications.js";
 import { formatOrderCode, orderYearFor } from "../utils/orderCode.js";
-import { addDaysToDateKey, brasiliaDateKey, networkNow } from "../utils/networkTime.js";
+import { BRASILIA_TIMEZONE, addDaysToDateKey, brasiliaDateKey, networkNow } from "../utils/networkTime.js";
+import { rejectInvalidUuid } from "../utils/validation.js";
 
 export const ordersRouter = express.Router();
+
+// Campos de opção "SIM"/"NÃO" do item (aceita "NAO" sem acento e normaliza para "NÃO")
+function yesNoField(label) {
+  return z.preprocess(
+    (v) => (typeof v === "string" ? v.trim().toUpperCase() : v),
+    z.enum(["SIM", "NÃO", "NAO"], {
+      errorMap: () => ({ message: `A opção ${label} deve ser 'SIM' ou 'NÃO'.` })
+    }).transform((v) => (v === "NAO" ? "NÃO" : v))
+  );
+}
 
 const orderItemSchema = z.object({
   itemName: z.string().optional().nullable().transform((val) => val?.trim() || ""),
@@ -24,48 +35,13 @@ const orderItemSchema = z.object({
       errorMap: () => ({ message: "A opção EMBALAGEM deve ser 'CAIXA' ou 'SACO BOLHA'." })
     })
   ),
-  battery: z.preprocess(
-    (v) => (typeof v === "string" ? v.trim().toUpperCase() : v),
-    z.enum(["SIM", "NÃO", "NAO"], {
-      errorMap: () => ({ message: "A opção BATERIA deve ser 'SIM' ou 'NÃO'." })
-    }).transform((v) => (v === "NAO" ? "NÃO" : v))
-  ),
-  terminalOpening: z.preprocess(
-    (v) => (typeof v === "string" ? v.trim().toUpperCase() : v),
-    z.enum(["SIM", "NÃO", "NAO"], {
-      errorMap: () => ({ message: "A opção ABERTURA DE TERMINAL deve ser 'SIM' ou 'NÃO'." })
-    }).transform((v) => (v === "NAO" ? "NÃO" : v))
-  ),
-  manual: z.preprocess(
-    (v) => (typeof v === "string" ? v.trim().toUpperCase() : v),
-    z.enum(["SIM", "NÃO", "NAO"], {
-      errorMap: () => ({ message: "A opção MANUAL deve ser 'SIM' ou 'NÃO'." })
-    }).transform((v) => (v === "NAO" ? "NÃO" : v))
-  ),
-  charger: z.preprocess(
-    (v) => (typeof v === "string" ? v.trim().toUpperCase() : v),
-    z.enum(["SIM", "NÃO", "NAO"], {
-      errorMap: () => ({ message: "A opção CARREGADOR deve ser 'SIM' ou 'NÃO'." })
-    }).transform((v) => (v === "NAO" ? "NÃO" : v))
-  ),
-  minbase: z.preprocess(
-    (v) => (typeof v === "string" ? v.trim().toUpperCase() : v),
-    z.enum(["SIM", "NÃO", "NAO"], {
-      errorMap: () => ({ message: "A opção MINBASE deve ser 'SIM' ou 'NÃO'." })
-    }).transform((v) => (v === "NAO" ? "NÃO" : v))
-  ),
-  label: z.preprocess(
-    (v) => (typeof v === "string" ? v.trim().toUpperCase() : v),
-    z.enum(["SIM", "NÃO", "NAO"], {
-      errorMap: () => ({ message: "A opção LABEL deve ser 'SIM' ou 'NÃO'." })
-    }).transform((v) => (v === "NAO" ? "NÃO" : v))
-  ),
-  aestheticCover: z.preprocess(
-    (v) => (typeof v === "string" ? v.trim().toUpperCase() : v),
-    z.enum(["SIM", "NÃO", "NAO"], {
-      errorMap: () => ({ message: "A opção COBRE ESTÉTICO deve ser 'SIM' ou 'NÃO'." })
-    }).transform((v) => (v === "NAO" ? "NÃO" : v))
-  )
+  battery: yesNoField("BATERIA"),
+  terminalOpening: yesNoField("ABERTURA DE TERMINAL"),
+  manual: yesNoField("MANUAL"),
+  charger: yesNoField("CARREGADOR"),
+  minbase: yesNoField("MINBASE"),
+  label: yesNoField("LABEL"),
+  aestheticCover: yesNoField("COBRE ESTÉTICO")
 });
 
 function normalizeItemBody(item) {
@@ -206,15 +182,40 @@ function canSeeOrder(user, order) {
   return user.role === "spectator" || order.destination_role === user.role;
 }
 
-const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+ordersRouter.param("id", rejectInvalidUuid("Registro nao encontrado."));
 
-// IDs inválidos retornam 404 em vez de provocar erro 500 no PostgreSQL
-ordersRouter.param("id", (req, res, next, id) => {
-  if (!UUID_REGEX.test(id)) {
-    return res.status(404).json({ message: "Registro nao encontrado." });
+// Filtros de visibilidade da listagem de ordens por perfil (alias "so" = service_orders)
+function visibilityFilters(user) {
+  const filters = [];
+  const params = [];
+
+  if (user.role === "requester") {
+    params.push(user.id);
+    filters.push(`so.requester_id = $${params.length}`);
+  } else if (user.role === "signer") {
+    params.push(user.role);
+    filters.push(`so.destination_role = $${params.length} AND so.status != 'draft'`);
+  } else if (user.role === "spectator") {
+    filters.push("so.status != 'draft'");
+  } else if (user.role === "stock") {
+    filters.push(STOCK_VISIBILITY_SQL);
   }
-  return next();
-});
+
+  return { filters, params };
+}
+
+// Normaliza o motivo opcional informado em apontamentos de assinatura incorreta
+function normalizeReason(raw) {
+  return typeof raw === "string" ? raw.trim() || null : null;
+}
+
+// Limpa o resultado da conferência por item (nova conferência do Estoque)
+function clearStockItemCheck(dbClient, orderId) {
+  return dbClient.query(
+    "UPDATE order_items SET stock_checked_quantity = NULL, stock_note = NULL, stock_accessories = NULL WHERE service_order_id = $1",
+    [orderId]
+  );
+}
 
 /**
  * Registra (ou atualiza) de forma atômica a ocorrência ativa de uma OS.
@@ -432,26 +433,7 @@ async function replaceOrderItems(orderId, items, dbClient = { query }) {
 }
 
 ordersRouter.get("/", async (req, res) => {
-  const filters = [];
-  const params = [];
-
-  if (req.user.role === "requester") {
-    params.push(req.user.id);
-    filters.push(`so.requester_id = $${params.length}`);
-  }
-
-  if (req.user.role === "signer") {
-    params.push(req.user.role);
-    filters.push(`so.destination_role = $${params.length} AND so.status != 'draft'`);
-  }
-
-  if (req.user.role === "spectator") {
-    filters.push("so.status != 'draft'");
-  }
-
-  if (req.user.role === "stock") {
-    filters.push(STOCK_VISIBILITY_SQL);
-  }
+  const { filters, params } = visibilityFilters(req.user);
 
   const executorTeam = req.query.executorTeam || req.query.executor_team;
   if (executorTeam) {
@@ -485,39 +467,22 @@ ordersRouter.get("/", async (req, res) => {
   return res.json(rows);
 });
 
-ordersRouter.delete("/all", requireRole("admin"), async (req, res) => {
-  const client = await pool.connect();
+// Remove todas as ordens e reinicia a numeração (disponível em DELETE /all e POST /clear-all)
+async function clearAllOrders(_req, res) {
   try {
-    await client.query("BEGIN");
-    await client.query("DELETE FROM service_orders");
-    await client.query("DELETE FROM os_sequences");
-    await client.query("COMMIT");
+    await withTransaction(async (client) => {
+      await client.query("DELETE FROM service_orders");
+      await client.query("DELETE FROM os_sequences");
+    });
     return res.json({ message: "Todas as ordens de serviço foram limpas com sucesso." });
   } catch (error) {
-    await client.query("ROLLBACK");
     console.error("Erro ao limpar ordens:", error);
     return res.status(500).json({ message: "Erro ao limpar todas as ordens de serviço." });
-  } finally {
-    client.release();
   }
-});
+}
 
-ordersRouter.post("/clear-all", requireRole("admin"), async (req, res) => {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    await client.query("DELETE FROM service_orders");
-    await client.query("DELETE FROM os_sequences");
-    await client.query("COMMIT");
-    return res.json({ message: "Todas as ordens de serviço foram limpas com sucesso." });
-  } catch (error) {
-    await client.query("ROLLBACK");
-    console.error("Erro ao limpar ordens:", error);
-    return res.status(500).json({ message: "Erro ao limpar todas as ordens de serviço." });
-  } finally {
-    client.release();
-  }
-});
+ordersRouter.delete("/all", requireRole("admin"), clearAllOrders);
+ordersRouter.post("/clear-all", requireRole("admin"), clearAllOrders);
 
 ordersRouter.post("/", requireRole("requester", "admin"), async (req, res) => {
   const parsed = orderSchema.safeParse(normalizeOrderBody(req.body));
@@ -650,27 +615,7 @@ ordersRouter.get("/next-code", async (req, res) => {
 });
 
 ordersRouter.get("/counts", async (req, res) => {
-  const filters = [];
-  const params = [];
-
-  if (req.user.role === "requester") {
-    params.push(req.user.id);
-    filters.push(`so.requester_id = $${params.length}`);
-  }
-
-  if (req.user.role === "signer") {
-    params.push(req.user.role);
-    filters.push(`so.destination_role = $${params.length} AND so.status != 'draft'`);
-  }
-
-  if (req.user.role === "spectator") {
-    filters.push("so.status != 'draft'");
-  }
-
-  if (req.user.role === "stock") {
-    filters.push(STOCK_VISIBILITY_SQL);
-  }
-
+  const { filters, params } = visibilityFilters(req.user);
   const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
   const { rows } = await query(
     `SELECT so.executor_team, COUNT(*)::int AS count
@@ -740,7 +685,7 @@ ordersRouter.post("/occurrences/:id/send-email", requireRole("admin", "signer"),
   // Evita notificações duplicadas: reenvio só com confirmação explícita
   if (occurrence.status === "email_sent" && req.body?.resend !== true) {
     return res.status(409).json({
-      message: `Esta ocorrência já foi notificada para ${occurrence.email_recipient} em ${new Date(occurrence.email_sent_at).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}.`
+      message: `Esta ocorrência já foi notificada para ${occurrence.email_recipient} em ${new Date(occurrence.email_sent_at).toLocaleString("pt-BR", { timeZone: BRASILIA_TIMEZONE })}.`
     });
   }
 
@@ -913,16 +858,8 @@ ordersRouter.get("/:id", async (req, res) => {
 
   const sanitizedEvents = events.rows.map((evt) => {
     let safeMessage = evt.message;
-    let safeActorName = evt.actor_name;
-    let safeActorEmail = evt.actor_email;
-    let safeActorId = evt.actor_id;
-
-    if (!isAdmin) {
-      if (safeMessage) {
-        if (/quantidade de chaves/i.test(safeMessage) && evt.event_type === "Assinada") {
-          safeMessage = safeMessage.replace(/Quantidade de chaves:\s*\d+\.\s*/i, "");
-        }
-      }
+    if (!isAdmin && evt.event_type === "Assinada" && /quantidade de chaves/i.test(safeMessage ?? "")) {
+      safeMessage = safeMessage.replace(/Quantidade de chaves:\s*\d+\.\s*/i, "");
     }
 
     let safeMetadata = null;
@@ -936,14 +873,7 @@ ordersRouter.get("/:id", async (req, res) => {
       }
     }
 
-    return {
-      ...evt,
-      actor_id: safeActorId,
-      actor_name: safeActorName,
-      actor_email: safeActorEmail,
-      message: safeMessage,
-      metadata: safeMetadata
-    };
+    return { ...evt, message: safeMessage, metadata: safeMetadata };
   });
 
   let divergence = null;
@@ -1003,29 +933,43 @@ ordersRouter.put("/:id", requireRole("requester", "admin"), async (req, res) => 
     return res.status(400).json({ message: catalogError });
   }
 
-  const { rows } = await query(
-    `UPDATE service_orders
-     SET order_type = $1, executor_team = COALESCE($2, executor_team), item_name = $3, item_identifier = $4, authorized_person_name = $5,
-         authorized_person_document = $6, usage_reason = $7, valid_from = $8,
-         valid_until = $9, destination_role = $10, status = 'draft', updated_at = NOW()
-     WHERE id = $11
-     RETURNING *`,
-    [
-      values.orderType,
-      values.executorTeam ?? null,
-      firstItem.itemName,
-      firstItem.itemIdentifier,
-      order.authorized_person_name,
-      order.authorized_person_document || order.code,
-      firstItem.configuration,
-      order.valid_from,
-      values.validUntil ?? order.valid_until ?? defaultValidUntil(await networkNow()),
-      "signer",
-      order.id
-    ]
-  );
+  const validUntil = values.validUntil ?? order.valid_until ?? defaultValidUntil(await networkNow());
 
-  await replaceOrderItems(order.id, values.items);
+  // Cabeçalho e itens são gravados juntos: nunca sobra uma ordem com itens pela metade.
+  // A condição de status evita sobrescrever uma ordem que mudou de etapa nesse meio-tempo.
+  const updated = await withTransaction(async (client) => {
+    const { rows } = await client.query(
+      `UPDATE service_orders
+       SET order_type = $1, executor_team = COALESCE($2, executor_team), item_name = $3, item_identifier = $4, authorized_person_name = $5,
+           authorized_person_document = $6, usage_reason = $7, valid_from = $8,
+           valid_until = $9, destination_role = $10, status = 'draft', updated_at = NOW()
+       WHERE id = $11 AND status = $12
+       RETURNING *`,
+      [
+        values.orderType,
+        values.executorTeam ?? null,
+        firstItem.itemName,
+        firstItem.itemIdentifier,
+        order.authorized_person_name,
+        order.authorized_person_document || order.code,
+        firstItem.configuration,
+        order.valid_from,
+        validUntil,
+        "signer",
+        order.id,
+        order.status
+      ]
+    );
+
+    if (rows[0]) {
+      await replaceOrderItems(order.id, values.items, client);
+    }
+    return rows[0];
+  });
+
+  if (!updated) {
+    return res.status(409).json({ message: "A ordem mudou de etapa enquanto era editada. Recarregue e tente novamente." });
+  }
 
   const fromStockReturn = order.status === "stock_returned";
 
@@ -1039,7 +983,7 @@ ordersRouter.put("/:id", requireRole("requester", "admin"), async (req, res) => 
     metadata: fromStockReturn ? { decision: "edit_order", previousStockResult: order.stock_result } : {}
   });
 
-  return res.json(rows[0]);
+  return res.json(updated);
 });
 
 ordersRouter.post("/:id/submit", requireRole("requester", "admin"), async (req, res) => {
@@ -1058,23 +1002,22 @@ ordersRouter.post("/:id/submit", requireRole("requester", "admin"), async (req, 
   }
 
   // Toda OS enviada (inclusive após correção do Suporte) passa pela conferência do Estoque
-  const { rows } = await query(
-    `UPDATE service_orders
-     SET status = 'awaiting_stock_check', stock_result = NULL, stock_accessories_note = NULL,
-         stock_checker_id = NULL, stock_checked_at = NULL, updated_at = NOW()
-     WHERE id = $1 AND status::text IN ('draft', 'correction_requested', 'divergent')
-     RETURNING *`,
-    [order.id]
-  );
+  const submitted = await withTransaction(async (client) => {
+    const { rows } = await client.query(
+      `UPDATE service_orders
+       SET status = 'awaiting_stock_check', stock_result = NULL, stock_accessories_note = NULL,
+           stock_checker_id = NULL, stock_checked_at = NULL, updated_at = NOW()
+       WHERE id = $1 AND status::text IN ('draft', 'correction_requested', 'divergent')
+       RETURNING *`,
+      [order.id]
+    );
+    if (rows[0]) await clearStockItemCheck(client, order.id);
+    return rows[0];
+  });
 
-  if (!rows[0]) {
+  if (!submitted) {
     return res.status(409).json({ message: "Ordem nao pode ser enviada neste status." });
   }
-
-  await query(
-    "UPDATE order_items SET stock_checked_quantity = NULL, stock_note = NULL, stock_accessories = NULL WHERE service_order_id = $1",
-    [order.id]
-  );
 
   await addOrderEvent({
     orderId: order.id,
@@ -1083,7 +1026,7 @@ ordersRouter.post("/:id/submit", requireRole("requester", "admin"), async (req, 
     message: "Ordem enviada para conferência do estoque."
   });
 
-  return res.json(rows[0]);
+  return res.json(submitted);
 });
 
 /**
@@ -1339,22 +1282,21 @@ ordersRouter.post("/:id/stock-return/recheck", requireRole("requester", "admin")
   if (!order) return;
 
   const note = typeof req.body?.message === "string" ? req.body.message.trim() : "";
-  const updated = await transitionStatus(
-    { query },
-    order.id,
-    "stock_returned",
-    "awaiting_stock_check",
-    "stock_result = NULL, stock_accessories_note = NULL, stock_checker_id = NULL, stock_checked_at = NULL"
-  );
+  const updated = await withTransaction(async (client) => {
+    const row = await transitionStatus(
+      client,
+      order.id,
+      "stock_returned",
+      "awaiting_stock_check",
+      "stock_result = NULL, stock_accessories_note = NULL, stock_checker_id = NULL, stock_checked_at = NULL"
+    );
+    if (row) await clearStockItemCheck(client, order.id);
+    return row;
+  });
 
   if (!updated) {
     return res.status(409).json({ message: "Esta ordem já recebeu uma decisão." });
   }
-
-  await query(
-    "UPDATE order_items SET stock_checked_quantity = NULL, stock_note = NULL, stock_accessories = NULL WHERE service_order_id = $1",
-    [order.id]
-  );
 
   await addOrderEvent({
     orderId: order.id,
@@ -1388,12 +1330,24 @@ ordersRouter.post("/:id/request-correction", requireRole("signer"), async (req, 
     return res.status(400).json({ message: "Informe o que precisa ser corrigido." });
   }
 
-  const { rows } = await query(
-    "UPDATE service_orders SET status = 'correction_requested', signer_id = NULL, second_signer_id = NULL, updated_at = NOW() WHERE id = $1 RETURNING *",
-    [order.id]
-  );
+  // Status e assinaturas mudam juntos; a condição de status impede duas devolutivas simultâneas.
+  const updated = await withTransaction(async (client) => {
+    const { rows } = await client.query(
+      `UPDATE service_orders
+       SET status = 'correction_requested', signer_id = NULL, second_signer_id = NULL, updated_at = NOW()
+       WHERE id = $1 AND status::text IN ('pending_signature', 'divergent')
+       RETURNING *`,
+      [order.id]
+    );
+    if (rows[0]) {
+      await client.query("DELETE FROM order_signatures WHERE service_order_id = $1", [order.id]);
+    }
+    return rows[0];
+  });
 
-  await query("DELETE FROM order_signatures WHERE service_order_id = $1", [order.id]);
+  if (!updated) {
+    return res.status(409).json({ message: "Apenas ordens pendentes ou divergentes podem receber devolutiva." });
+  }
 
   await addOrderEvent({
     orderId: order.id,
@@ -1402,7 +1356,7 @@ ordersRouter.post("/:id/request-correction", requireRole("signer"), async (req, 
     message: parsed.data.message
   });
 
-  return res.json(rows[0]);
+  return res.json(updated);
 });
 
 ordersRouter.post("/:id/sign", requireRole("signer"), async (req, res) => {
@@ -1612,6 +1566,11 @@ ordersRouter.post("/:id/incorrect-signature", requireRole("signer", "admin"), as
     return res.status(403).json({ message: "Apenas administradores podem invalidar assinaturas de ordens já concluídas." });
   }
 
+  const reasonText = normalizeReason(req.body?.reason);
+  const reason = reasonText ? ` Motivo: ${reasonText}.` : "";
+  // Status permitidos no momento da escrita (mesma regra validada acima, aplicada de forma atômica)
+  const allowedStatuses = req.user.role === "admin" ? ["pending_signature", "signed"] : ["pending_signature"];
+
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -1623,17 +1582,21 @@ ordersRouter.post("/:id/incorrect-signature", requireRole("signer", "admin"), as
            second_signer_id = NULL,
            incorrect_signatures = COALESCE(incorrect_signatures, 0) + 1,
            updated_at = NOW()
-       WHERE id = $1
+       WHERE id = $1 AND status::text = ANY($2::text[])
        RETURNING *`,
-      [order.id]
+      [order.id, allowedStatuses]
     );
+
+    if (!rows[0]) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ message: "A ordem mudou de etapa. Recarregue e tente novamente." });
+    }
 
     const signaturesBefore = await loadSignaturesForAttempt(client, order.id);
 
     await client.query("DELETE FROM order_signatures WHERE service_order_id = $1", [order.id]);
 
     const incorrectCount = rows[0].incorrect_signatures;
-    const reason = req.body?.reason ? ` Motivo: ${req.body.reason}.` : "";
 
     await recordSignatureAttempt(client, {
       orderId: order.id,
@@ -1641,7 +1604,7 @@ ordersRouter.post("/:id/incorrect-signature", requireRole("signer", "admin"), as
       errorType: "assinatura_incorreta",
       signatures: signaturesBefore,
       reportedBy: req.user,
-      reason: typeof req.body?.reason === "string" ? req.body.reason.trim() || null : null
+      reason: reasonText
     });
 
     if (incorrectCount >= 2) {
@@ -1665,7 +1628,7 @@ ordersRouter.post("/:id/incorrect-signature", requireRole("signer", "admin"), as
         `Assinatura realizada incorretamente (${incorrectCount}ª tentativa).${reason} Ordem retornada para a etapa de assinatura.`,
         {
           incorrectCount,
-          reason: req.body?.reason || null
+          reason: reasonText
         }
       ]
     );

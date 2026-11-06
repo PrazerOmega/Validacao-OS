@@ -19,10 +19,6 @@ export async function syncOfficialTime() {
   return data;
 }
 
-export function isOfficialTimeSynced() {
-  return offsetMs !== null;
-}
-
 export function startOfficialTimeSync() {
   setInterval(() => {
     syncOfficialTime().catch(() => {});

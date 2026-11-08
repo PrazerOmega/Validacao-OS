@@ -1988,6 +1988,12 @@ function occurrenceErrorLabel(value) {
   return occurrenceErrorLabels[value] ?? value ?? "-";
 }
 
+function occurrenceStatusLabel(status) {
+  if (status === "resolved") return "Resolvida";
+  if (status === "email_sent") return "E-mail enviado";
+  return "Pendente";
+}
+
 function formatKeyCount(value) {
   if (value === null || value === undefined) return null;
   return `${value} ${Number(value) === 1 ? "chave" : "chaves"}`;
@@ -2053,6 +2059,16 @@ function OccurrencesPanel({ api, onSelectOrder, isAdmin = false }) {
   const [emailSending, setEmailSending] = useState(false);
   const [emailResponse, setEmailResponse] = useState(null);
   const [notificationMsg, setNotificationMsg] = useState(null);
+  const [expandedIds, setExpandedIds] = useState(() => new Set());
+
+  const toggleExpanded = (id) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   const fetchOccurrences = useCallback(async () => {
     try {
@@ -2123,6 +2139,7 @@ function OccurrencesPanel({ api, onSelectOrder, isAdmin = false }) {
   const pendingCount = occurrences.filter((o) => o.status === "pending").length;
   const sentCount = occurrences.filter((o) => o.status === "email_sent").length;
   const resolvedCount = occurrences.filter((o) => o.status === "resolved").length;
+  const allExpanded = filtered.length > 0 && filtered.every((o) => expandedIds.has(o.id));
 
   return (
     <div className="occurrences-panel">
@@ -2229,69 +2246,57 @@ function OccurrencesPanel({ api, onSelectOrder, isAdmin = false }) {
         </div>
       </div>
 
-      <div className="occurrences-table-wrapper">
+      {filtered.length > 0 && (
+        <div className="occ-list-toolbar">
+          <small className="muted">
+            {filtered.length} {filtered.length === 1 ? "ocorrência" : "ocorrências"} — clique em uma linha para ver os detalhes
+          </small>
+          <button
+            type="button"
+            className="ghost occ-expand-all-btn"
+            onClick={() => setExpandedIds(allExpanded ? new Set() : new Set(filtered.map((o) => o.id)))}
+          >
+            <ChevronDown size={14} className={allExpanded ? "occ-chevron open" : "occ-chevron"} />
+            {allExpanded ? "Recolher todas" : "Expandir todas"}
+          </button>
+        </div>
+      )}
+
+      <div className="occ-list">
         {filtered.length === 0 ? (
           <div className="occurrences-empty">
             <Inbox size={36} className="muted" />
             <p>Nenhuma ocorrência encontrada para os filtros selecionados.</p>
           </div>
         ) : (
-          <table className="occurrences-table">
-            <thead>
-              <tr>
-                <th>Ordem de Serviço</th>
-                <th>Data / Hora</th>
-                <th>Usuário Envolvido</th>
-                <th>Tipo do Erro & Descrição</th>
-                <th>Tentativas</th>
-                <th>Situação</th>
-                <th>Ações</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((occ) => (
-                <React.Fragment key={occ.id}>
-                <tr className={`occ-row occ-row-main ${occ.status}`}>
-                  <td className="occ-cell-os">
-                    <button
-                      type="button"
-                      className="occ-os-btn"
-                      onClick={() => onSelectOrder && onSelectOrder(occ.service_order_id)}
-                      title="Abrir detalhes desta OS"
-                    >
-                      <ClipboardList size={14} />
-                      <strong>{occ.order_code}</strong>
-                    </button>
-                    <small className="muted">{occ.order_type} ({occ.executor_team || "suporte"})</small>
-                  </td>
-                  <td className="occ-cell-date">
-                    <span>{formatDateTime(occ.created_at)}</span>
-                  </td>
-                  <td className="occ-cell-user">
-                    <strong>{occ.user_name}</strong>
-                  </td>
-                  <td className="occ-cell-desc">
-                    <span className="occ-error-type-tag">{occurrenceErrorLabel(occ.error_type)}</span>
-                    <p className="occ-desc-text">{occ.description}</p>
-                  </td>
-                  <td className="occ-cell-attempts">
-                    <span className="occ-attempt-badge">{occ.attempt_count} tentativas</span>
-                  </td>
-                  <td className="occ-cell-status">
-                    <span className={`occ-status-badge ${occ.status}`}>
-                      {occ.status === "resolved"
-                        ? "Resolvida"
-                        : occ.status === "email_sent"
-                          ? "E-mail Enviado"
-                          : "Pendente"}
+          filtered.map((occ) => {
+            const isOpen = expandedIds.has(occ.id);
+            const bodyId = `occ-body-${occ.id}`;
+            return (
+              <article key={occ.id} className={`occ-item ${occ.status} ${isOpen ? "open" : ""}`}>
+                <div className="occ-item-head">
+                  <button
+                    type="button"
+                    className="occ-item-toggle"
+                    aria-expanded={isOpen}
+                    aria-controls={bodyId}
+                    onClick={() => toggleExpanded(occ.id)}
+                  >
+                    <ChevronDown size={18} className={isOpen ? "occ-chevron open" : "occ-chevron"} />
+                    <span className="occ-item-main">
+                      <span className="occ-item-title">
+                        <strong>OS {occ.order_code}</strong>
+                        <span className="occ-error-type-tag">{occurrenceErrorLabel(occ.error_type)}</span>
+                      </span>
+                      <span className="occ-item-meta">
+                        <span><UserCheck size={13} /> {occ.user_name}</span>
+                        <span><Clock3 size={13} /> {formatDateTime(occ.created_at)}</span>
+                        <span className="occ-attempt-badge">{occ.attempt_count} tentativas</span>
+                      </span>
                     </span>
-                    {occ.email_sent_at && (
-                      <small className="muted block">
-                        Envio: {formatDateTime(occ.email_sent_at)}
-                      </small>
-                    )}
-                  </td>
-                  <td className="occ-cell-actions">
+                    <span className={`occ-status-badge ${occ.status}`}>{occurrenceStatusLabel(occ.status)}</span>
+                  </button>
+                  <div className="occ-item-actions">
                     <button
                       type="button"
                       className="occ-action-btn email"
@@ -2312,17 +2317,70 @@ function OccurrencesPanel({ api, onSelectOrder, isAdmin = false }) {
                         <span>Resolver</span>
                       </button>
                     )}
-                  </td>
-                </tr>
-                <tr className={`occ-history-row ${occ.status}`}>
-                  <td colSpan={7}>
-                    <SignatureAttemptsHistory attempts={occ.attempts} />
-                  </td>
-                </tr>
-                </React.Fragment>
-              ))}
-            </tbody>
-          </table>
+                  </div>
+                </div>
+
+                {isOpen && (
+                  <div className="occ-item-body" id={bodyId}>
+                    <div className="occ-detail-block">
+                      <span className="occ-detail-label">Descrição</span>
+                      <p className="occ-detail-desc">{occ.description || "—"}</p>
+                    </div>
+
+                    <dl className="occ-detail-grid">
+                      <div>
+                        <dt>Tipo da ordem</dt>
+                        <dd>{occ.order_type || "—"}</dd>
+                      </div>
+                      <div>
+                        <dt>Equipe executora</dt>
+                        <dd>{occ.executor_team === "producao" ? "Produção" : "Suporte"}</dd>
+                      </div>
+                      <div>
+                        <dt>Situação da OS</dt>
+                        <dd>{statusLabels[occ.order_status] ?? occ.order_status ?? "—"}</dd>
+                      </div>
+                      <div>
+                        <dt>Solicitante</dt>
+                        <dd>{occ.requester_name || occ.authorized_person_name || "—"}</dd>
+                      </div>
+                      <div>
+                        <dt>Usuário envolvido</dt>
+                        <dd>{occ.user_name || "—"}</dd>
+                      </div>
+                      <div>
+                        <dt>Registrada em</dt>
+                        <dd>{formatDateTime(occ.created_at)}</dd>
+                      </div>
+                      <div>
+                        <dt>E-mail enviado</dt>
+                        <dd>
+                          {occ.email_sent_at
+                            ? `${formatDateTime(occ.email_sent_at)}${occ.email_recipient ? ` para ${occ.email_recipient}` : ""}`
+                            : "Ainda não enviado"}
+                        </dd>
+                      </div>
+                    </dl>
+
+                    <div className="occ-attempts-scroll">
+                      <SignatureAttemptsHistory attempts={occ.attempts} />
+                    </div>
+
+                    <div className="occ-item-body-footer">
+                      <button
+                        type="button"
+                        className="ghost occ-open-order-btn"
+                        onClick={() => onSelectOrder && onSelectOrder(occ.service_order_id)}
+                      >
+                        <ClipboardList size={14} />
+                        Abrir OS {occ.order_code}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </article>
+            );
+          })
         )}
       </div>
 

@@ -356,6 +356,7 @@ Nesta versão, a assinatura gera um hash SHA-256 com os dados da ordem, o usuár
 | Sintoma | Causa provável / solução |
 | ------- | ------------------------ |
 | `failed to connect to the docker API` | Docker Desktop fechado. Abra-o e rode `docker compose up -d` de novo. |
+| `docker compose up -d` falha com `The container name "/ordens_servico_postgres" is already in use` | Já existe outra cópia do projeto na máquina usando os mesmos nomes de container. Rode `docker start ordens_servico_postgres ordens_servico_mailpit` para reaproveitar os containers. Atenção: as duas cópias passam a usar o mesmo banco. Para bancos separados, mude `container_name` e a porta no `docker-compose.yml` de uma das cópias. |
 | API encerra com `JWT_SECRET não definido` | Falta o arquivo `apps/api/.env`. Veja o passo 1.5. |
 | Erro de conexão com o banco (`ECONNREFUSED 5432`) | Container do Postgres parado. Rode `docker compose up -d`. |
 | Login não funciona logo após instalar | Rode `npm run db:setup` para criar os usuários iniciais. |

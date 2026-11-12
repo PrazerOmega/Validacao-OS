@@ -16,12 +16,14 @@ Tudo na raiz. Requer Node ≥ 22.15 (por causa de `--use-system-ca`) e Docker De
 npm install
 docker compose up -d                      # postgres :5432, mailpit SMTP :1025 / UI :8025
 cp apps/api/.env.example apps/api/.env    # variáveis novas no .env.example precisam ser copiadas manualmente
-npm run db:setup                          # idempotente: aplica schema.sql + upsert dos usuários seed
+npm run db:setup                          # idempotente: aplica schema.sql + cria usuários seed ausentes (não reativa nem altera existentes)
 npm run dev                               # API :3333 + web :5173
 npm run dev:api | npm run dev:web
 npm run build                             # web → apps/web/dist (Firebase Hosting via firebase.json)
 npm test                                  # testes de integração da API (exigem API rodando e banco com seed)
 ```
+
+O `docker-compose.yml` fixa os nomes `ordens_servico_postgres` e `ordens_servico_mailpit`. Se houver outra cópia do projeto na máquina, `docker compose up -d` falha com "container name already in use". Nesse caso, `docker start ordens_servico_postgres ordens_servico_mailpit` reaproveita os containers existentes, mas as duas cópias passam a compartilhar o mesmo banco. Não remover containers de outra cópia sem perguntar.
 
 Usuários seed (senha `123456`, domínio `@empresa.com`): `admin`, `solicitante` (requester), `assinante` / `assinante2` (signer), `espectador` (spectator), `estoque` (stock).
 
@@ -34,6 +36,7 @@ O processo-alvo da OS está em `.claude/docs/fluxo-os.md` (transcrição de `flu
 - Não alinhar ao fluxograma partes do código fora do escopo da tarefa. Se a tarefa tocar uma divergência conhecida, apontá-la e perguntar antes de mudar.
 - O fluxograma não define detalhes de sistema (nomes de status, campos, papéis). Seguir as decisões registradas em `.claude/docs/decisoes-fluxo-os.md`; o que não estiver decidido ali, perguntar.
 - Divergências mapeadas entre código atual e alvo: `.claude/docs/gap-fluxo-os.md`.
+- Plano de implementação do fluxo-alvo (Entregas 1 e 2, flag `OS_FLOW_V2` + `flow_version`): `.claude/docs/plano-fluxo-os.md`. As propostas desse documento aguardam aprovação e não são decisões. Só passam a valer quando forem registradas em `decisoes-fluxo-os.md`.
 - Regras de negócio do comportamento atual: README, seção 3.
 
 Resumo dos status (comportamento ATUAL do código):

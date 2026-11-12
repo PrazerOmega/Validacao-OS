@@ -21,7 +21,7 @@ Nunca alterar instruções anteriores de forma que quebre bancos existentes.
 ## Rotas de OS (`src/routes/orders.js`)
 
 - Contém toda a máquina de estados da OS (~1.6k linhas). Conferir o fluxograma citado no `CLAUDE.md` da raiz antes de mexer em transições.
-- Rotas estáticas (`/divergent`, `/occurrences`, `/all`) ficam declaradas antes de `/:id`.
+- Rotas estáticas (`/divergent`, `/next-code`, `/counts`, `/occurrences`, `/all`, `/clear-all`) ficam declaradas antes de `/:id`. Rota estática nova também.
 - Parâmetros `:id` passam por `rejectInvalidUuid` (`utils/validation.js`), para que IDs inválidos retornem 404 e não 500 do Postgres.
 - Escritas com múltiplas instruções usam `withTransaction(client => ...)` de `db/pool.js`.
 - Toda mudança de estado grava uma linha em `order_events` (`utils/audit.js` ou insert inline). O histórico da OS na UI é montado a partir dela; uma transição sem evento é bug.

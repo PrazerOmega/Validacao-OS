@@ -299,6 +299,9 @@ async function runStockTests() {
 
   const stockSeesDraft = await request(`/orders/${editOrder.id}`, { headers: auth(stockToken) });
   assert.equal(stockSeesDraft.status, 403, "Estoque não deve ver rascunhos");
+  // O rascunho mantém stock_checker_id da conferência anterior; mesmo assim não pode aparecer na lista do Estoque
+  const stockListAfterEdit = await request("/orders", { headers: auth(stockToken) });
+  assert.ok(!stockListAfterEdit.data.some((o) => o.id === editOrder.id), "Rascunho já conferido não deve aparecer na lista do Estoque");
 
   const resubmitEdited = await request(`/orders/${editOrder.id}/submit`, { method: "POST", headers: auth(requesterToken) });
   assert.equal(resubmitEdited.data.status, "awaiting_stock_check", "OS editada volta a passar pelo Estoque");

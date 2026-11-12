@@ -22,12 +22,13 @@ async function main() {
 
   const passwordHash = await bcrypt.hash("123456", 10);
 
+  // Só cria os usuários seed que ainda não existem. Não reativa nem altera papel/nome de quem já existe:
+  // reexecutar o setup não pode desfazer uma desativação feita pelo admin (a senha padrão é conhecida).
   for (const user of users) {
     await query(
       `INSERT INTO users (name, email, password_hash, role)
        VALUES ($1, $2, $3, $4)
-       ON CONFLICT (email) DO UPDATE
-       SET name = EXCLUDED.name, role = EXCLUDED.role, active = TRUE`,
+       ON CONFLICT (email) DO NOTHING`,
       [user.name, user.email, passwordHash, user.role]
     );
   }

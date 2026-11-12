@@ -9,6 +9,9 @@ export const usersRouter = express.Router();
 
 usersRouter.param("id", rejectInvalidUuid("Usuario nao encontrado."));
 
+// UUID é aceito em maiúsculas pela rota, mas o Postgres devolve em minúsculas
+const isSelf = (req) => req.params.id.toLowerCase() === String(req.user.id).toLowerCase();
+
 const userSchema = z.object({
   name: z.string().min(2),
   email: z.string().email(),
@@ -69,7 +72,7 @@ usersRouter.patch("/:id", requireRole("admin"), async (req, res) => {
     return res.status(400).json({ message: "Dados de usuario invalidos." });
   }
 
-  if (req.params.id === req.user.id && (parsed.data.role || parsed.data.active === false)) {
+  if (isSelf(req) && (parsed.data.role || parsed.data.active === false)) {
     return res.status(409).json({ message: "Nao altere seu proprio tipo nem remova seu proprio usuario." });
   }
 
@@ -105,7 +108,7 @@ usersRouter.patch("/:id", requireRole("admin"), async (req, res) => {
 });
 
 usersRouter.delete("/:id", requireRole("admin"), async (req, res) => {
-  if (req.params.id === req.user.id) {
+  if (isSelf(req)) {
     return res.status(409).json({ message: "Nao remova seu proprio usuario." });
   }
 

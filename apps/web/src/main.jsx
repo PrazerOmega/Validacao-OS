@@ -287,6 +287,9 @@ const realtimeSyncChannel = typeof window !== "undefined" && "BroadcastChannel" 
 
 // Executa uma ação cuja mensagem de erro já é exibida por quem a implementa (ex.: runOrderAction),
 // evitando que a rejeição vaze como "Uncaught (in promise)" no console.
+// Mesmo mínimo do feedbackSchema da API (POST /orders/:id/request-correction)
+const MIN_CORRECTION_LENGTH = 5;
+
 function runHandled(action, ...args) {
   return Promise.resolve()
     .then(() => action?.(...args))
@@ -1278,6 +1281,22 @@ function LogoutConfirmDialog({ userName, onCancel, onConfirm }) {
 
 function OrderForm({ form, setForm, catalog, editingId, onSubmit, onCancel, onDirectSubmit, session, api }) {
   const [nextCode, setNextCode] = useState("");
+  const [saving, setSaving] = useState(false);
+  // Ref (e não só estado) porque um duplo clique dispara dois submits antes do re-render
+  const savingRef = useRef(false);
+
+  async function handleSubmit(event) {
+    event.preventDefault();
+    if (savingRef.current) return;
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      await onSubmit(event);
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
+  }
 
   useEffect(() => {
     if (!editingId && api) {
@@ -1359,7 +1378,7 @@ function OrderForm({ form, setForm, catalog, editingId, onSubmit, onCancel, onDi
   }
 
   return (
-    <form className="panel order-form" onSubmit={onSubmit}>
+    <form className="panel order-form" onSubmit={handleSubmit}>
       <div className="panel-title">
         <Plus size={18} />
         <h3>{editingId ? "Editar ordem" : "Nova ordem"}</h3>
@@ -1561,9 +1580,9 @@ function OrderForm({ form, setForm, catalog, editingId, onSubmit, onCancel, onDi
       </section>
       <div className="actions">
         {editingId && <button type="button" className="ghost" onClick={onCancel}>Cancelar</button>}
-        <button className="primary" type="submit">
+        <button className="primary" type="submit" disabled={saving}>
           <FileSignature size={18} />
-          Salvar
+          {saving ? "Salvando..." : "Salvar"}
         </button>
         {editingId && onDirectSubmit && (
           <button type="button" className="success" onClick={onDirectSubmit}>
@@ -2058,6 +2077,7 @@ function OccurrencesPanel({ api, onSelectOrder, isAdmin = false }) {
   const [emailRecipient, setEmailRecipient] = useState("");
   const [emailSending, setEmailSending] = useState(false);
   const [emailResponse, setEmailResponse] = useState(null);
+  const [emailError, setEmailError] = useState("");
   const [notificationMsg, setNotificationMsg] = useState(null);
   const [expandedIds, setExpandedIds] = useState(() => new Set());
 
@@ -2092,21 +2112,28 @@ function OccurrencesPanel({ api, onSelectOrder, isAdmin = false }) {
     setSelectedForEmail(occ);
     setEmailRecipient(occ.email_recipient || "");
     setEmailResponse(null);
+    setEmailError("");
   };
 
   const handleSendEmail = async () => {
     if (!selectedForEmail) return;
+    // Ocorrência já notificada: o clique em "Reenviar Notificação" é a confirmação explícita exigida pela API
+    const isResend = selectedForEmail.status === "email_sent";
     try {
       setEmailSending(true);
+      setEmailError("");
+      setEmailResponse(null);
       const res = await api.request(`/orders/occurrences/${selectedForEmail.id}/send-email`, {
         method: "POST",
-        body: JSON.stringify({ recipient: emailRecipient || undefined })
+        body: JSON.stringify({ recipient: emailRecipient || undefined, resend: isResend || undefined })
       });
       setEmailResponse(res);
+      setSelectedForEmail((prev) => (prev && prev.status !== "resolved" ? { ...prev, status: "email_sent" } : prev));
       fetchOccurrences();
     } catch (err) {
       console.error("Erro ao enviar e-mail:", err);
-      setNotificationMsg({ type: "error", text: err?.message || "Erro ao preparar/enviar e-mail." });
+      // Exibe dentro do modal: o banner do painel fica escondido atrás do fundo do modal
+      setEmailError(err?.message || "Erro ao preparar/enviar e-mail.");
     } finally {
       setEmailSending(false);
     }
@@ -2415,6 +2442,29 @@ function OccurrencesPanel({ api, onSelectOrder, isAdmin = false }) {
                 </small>
               </div>
 
+              {selectedForEmail.status === "email_sent" && !emailResponse && (
+                <div className="notification-banner warning">
+                  <div className="notification-content">
+                    <strong>Ocorrência já notificada</strong>
+                    <p>
+                      {selectedForEmail.email_sent_at
+                        ? `Enviada em ${formatDateTime(selectedForEmail.email_sent_at)}${selectedForEmail.email_recipient ? ` para ${selectedForEmail.email_recipient}` : ""}. `
+                        : ""}
+                      Confirme em "Reenviar Notificação" para enviar novamente.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {emailError && (
+                <div className="notification-banner error">
+                  <div className="notification-content">
+                    <strong>Falha no envio</strong>
+                    <p>{emailError}</p>
+                  </div>
+                </div>
+              )}
+
               {emailResponse && (
                 <div className={`notification-banner ${emailResponse.configured ? "success" : "warning"}`}>
                   <div className="notification-content">
@@ -2461,7 +2511,7 @@ function OccurrencesPanel({ api, onSelectOrder, isAdmin = false }) {
                 ) : (
                   <>
                     <Send size={14} />
-                    <span>Disparar Notificação</span>
+                    <span>{selectedForEmail.status === "email_sent" ? "Reenviar Notificação" : "Disparar Notificação"}</span>
                   </>
                 )}
               </button>
@@ -3773,9 +3823,12 @@ function OrderDetails({
                 type="button"
                 disabled={!keyCount || Number(keyCount) <= 0}
                 onClick={() => {
-                  runHandled(onSign, keyCount);
-                  setValidationDecision(null);
-                  setKeyCount("");
+                  // Só limpa depois que a API aceitar: em caso de erro, a quantidade digitada continua na tela
+                  runHandled(async () => {
+                    await onSign(keyCount);
+                    setValidationDecision(null);
+                    setKeyCount("");
+                  });
                 }}
               >
                 <CheckCircle2 size={18} />
@@ -3795,14 +3848,20 @@ function OrderDetails({
                   required
                 />
               </label>
+              {correctionMsg.trim().length > 0 && correctionMsg.trim().length < MIN_CORRECTION_LENGTH && (
+                <small className="muted">Descreva a correção com pelo menos {MIN_CORRECTION_LENGTH} caracteres.</small>
+              )}
               <button
                 className="danger"
                 type="button"
-                disabled={!correctionMsg.trim()}
+                disabled={correctionMsg.trim().length < MIN_CORRECTION_LENGTH}
                 onClick={() => {
-                  runHandled(onCorrection, correctionMsg);
-                  setValidationDecision(null);
-                  setCorrectionMsg("");
+                  // Só limpa depois que a API aceitar: em caso de erro, o texto digitado continua na tela
+                  runHandled(async () => {
+                    await onCorrection(correctionMsg.trim());
+                    setValidationDecision(null);
+                    setCorrectionMsg("");
+                  });
                 }}
               >
                 <RefreshCw size={18} />
@@ -4234,14 +4293,13 @@ function escapeHtml(value) {
 
 function formatDate(value) {
   if (!value) return "-";
-  if (typeof value === "string") {
-    const trimmed = value.slice(0, 10);
-    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
-      const [year, month, day] = trimmed.split("-");
-      return `${day}/${month}/${year}`;
-    }
+  // Data pura (coluna DATE, "AAAA-MM-DD"): formata sem conversão de fuso
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const [year, month, day] = value.split("-");
+    return `${day}/${month}/${year}`;
   }
-  return new Intl.DateTimeFormat("pt-BR").format(new Date(value));
+  // Data com horário (timestamp ISO em UTC): converte para o dia de Brasília
+  return new Intl.DateTimeFormat("pt-BR", { timeZone: BRASILIA_TIMEZONE }).format(new Date(value));
 }
 
 function formatDateTime(value) {

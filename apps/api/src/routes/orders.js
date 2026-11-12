@@ -166,7 +166,9 @@ const signatureSchema = z.object({
 
 const STOCK_STATUSES = ["awaiting_stock_check", "stock_checking", "stock_picking", "stock_returned"];
 // O Estoque vê as ordens em conferência e as que já passaram por ele
-const STOCK_VISIBILITY_SQL = `(so.status::text IN (${STOCK_STATUSES.map((status) => `'${status}'`).join(", ")}) OR so.stock_checker_id IS NOT NULL)`;
+// Rascunho nunca entra (mesma regra de canSeeOrder): uma OS conferida e depois editada volta a draft
+// mas mantém stock_checker_id, e sem essa exclusão apareceria na lista do Estoque com 403 ao abrir.
+const STOCK_VISIBILITY_SQL = `(so.status::text <> 'draft' AND (so.status::text IN (${STOCK_STATUSES.map((status) => `'${status}'`).join(", ")}) OR so.stock_checker_id IS NOT NULL))`;
 
 const STOCK_RESULT_LABELS = {
   complete: "completo",
@@ -224,11 +226,13 @@ function clearStockItemCheck(dbClient, orderId) {
  * A descrição nunca contém quantidades de chaves, para não comprometer o double check cego.
  */
 async function upsertActiveOccurrence(client, { order, user, errorType, attemptCount, description }) {
+  // created_at da ocorrência aparece no e-mail de alerta: vem da hora oficial, não do NOW() do banco
+  const createdAt = await networkNow();
   await client.query(
     `INSERT INTO signature_occurrences (
-       service_order_id, order_code, user_id, user_name, error_type, attempt_count, description, status
+       service_order_id, order_code, user_id, user_name, error_type, attempt_count, description, status, created_at
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
+     VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)
      ON CONFLICT (service_order_id) WHERE status <> 'resolved'
      DO UPDATE SET
        attempt_count = GREATEST(signature_occurrences.attempt_count, EXCLUDED.attempt_count),
@@ -237,7 +241,7 @@ async function upsertActiveOccurrence(client, { order, user, errorType, attemptC
        error_type = EXCLUDED.error_type,
        description = EXCLUDED.description,
        updated_at = NOW()`,
-    [order.id, order.code, user.id, user.name, errorType, attemptCount, description]
+    [order.id, order.code, user.id, user.name, errorType, attemptCount, description, createdAt]
   );
 }
 
@@ -527,9 +531,9 @@ ordersRouter.post("/", requireRole("requester", "admin"), async (req, res) => {
       `INSERT INTO service_orders (
          code, order_year, order_sequence, order_type, executor_team, item_name, item_identifier,
          authorized_person_name, authorized_person_document, usage_reason,
-         valid_from, valid_until, requester_id, destination_role, created_at, updated_at
+         valid_from, valid_until, requester_id, destination_role, created_at, updated_at, signature_due_at
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $14, $11, $12, $13, $15, $15)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $14, $11, $12, $13, $15, $15, $16)
        RETURNING *`,
       [
         code,
@@ -546,13 +550,13 @@ ordersRouter.post("/", requireRole("requester", "admin"), async (req, res) => {
         req.user.id,
         "signer",
         brasiliaDateKey(now),
-        now
+        now,
+        // Prazo de assinatura: 1 dia a partir da hora oficial (antes vinha do DEFAULT NOW() do banco)
+        new Date(now.getTime() + 24 * 60 * 60 * 1000)
       ]
     );
 
     await replaceOrderItems(rows[0].id, values.items, client);
-
-    await client.query("COMMIT");
 
     await addOrderEvent({
       orderId: rows[0].id,
@@ -560,7 +564,9 @@ ordersRouter.post("/", requireRole("requester", "admin"), async (req, res) => {
       eventType: "Criação",
       message: `Ordem ${code} criada por ${requesterName} (Equipe executora: ${teamLabel}).`,
       metadata: { executorTeam: values.executorTeam }
-    });
+    }, client);
+
+    await client.query("COMMIT");
 
     return res.status(201).json(rows[0]);
   } catch (error) {
@@ -743,26 +749,30 @@ ordersRouter.post("/occurrences/:id/resolve", requireRole("admin", "signer"), as
     return res.status(403).json({ message: "O usuário envolvido não pode resolver a própria ocorrência." });
   }
 
-  const { rows } = await query(
-    `UPDATE signature_occurrences
-     SET status = 'resolved', updated_at = NOW()
-     WHERE id = $1 AND status <> 'resolved'
-     RETURNING *`,
-    [occurrence.id]
-  );
+  const resolved = await withTransaction(async (client) => {
+    const { rows } = await client.query(
+      `UPDATE signature_occurrences
+       SET status = 'resolved', updated_at = NOW()
+       WHERE id = $1 AND status <> 'resolved'
+       RETURNING *`,
+      [occurrence.id]
+    );
+    if (rows[0]) {
+      await addOrderEvent({
+        orderId: occurrence.service_order_id,
+        actorId: req.user.id,
+        eventType: "Ocorrência resolvida",
+        message: "Ocorrência de assinatura incorreta marcada como resolvida."
+      }, client);
+    }
+    return rows[0];
+  });
 
-  if (!rows[0]) {
+  if (!resolved) {
     return res.status(409).json({ message: "Esta ocorrência já está resolvida." });
   }
 
-  await addOrderEvent({
-    orderId: occurrence.service_order_id,
-    actorId: req.user.id,
-    eventType: "Ocorrência resolvida",
-    message: "Ocorrência de assinatura incorreta marcada como resolvida."
-  });
-
-  return res.json(sanitizeOccurrence(rows[0], req.user));
+  return res.json(sanitizeOccurrence(resolved, req.user));
 });
 
 ordersRouter.get("/:id", async (req, res) => {
@@ -826,10 +836,11 @@ ordersRouter.get("/:id", async (req, res) => {
       return sigWithoutHash;
     }
 
-    // Quando a ordem está concluída (assinada), exibir os nomes dos validadores normalmente
+    // Quando a ordem está concluída (assinada), exibir os nomes dos validadores normalmente,
+    // mas a contagem de chaves continua visível somente para admin (regra de sigilo)
     if (order.status === "signed") {
-      const { signed_payload, ...rest } = sigWithoutHash;
-      return rest;
+      const { signed_payload, key_count, ...rest } = sigWithoutHash;
+      return { ...rest, key_count: null };
     }
 
     // Para terceiros / segundo assinante durante double check pendente: omitir dados para evitar viés
@@ -963,6 +974,16 @@ ordersRouter.put("/:id", requireRole("requester", "admin"), async (req, res) => 
 
     if (rows[0]) {
       await replaceOrderItems(order.id, values.items, client);
+      const fromStockReturn = order.status === "stock_returned";
+      await addOrderEvent({
+        orderId: order.id,
+        actorId: req.user.id,
+        eventType: "Atualizada",
+        message: fromStockReturn
+          ? "Operações optou por editar a ordem devolvida pelo estoque. Ordem retornou para rascunho."
+          : "Ordem atualizada.",
+        metadata: fromStockReturn ? { decision: "edit_order", previousStockResult: order.stock_result } : {}
+      }, client);
     }
     return rows[0];
   });
@@ -970,18 +991,6 @@ ordersRouter.put("/:id", requireRole("requester", "admin"), async (req, res) => 
   if (!updated) {
     return res.status(409).json({ message: "A ordem mudou de etapa enquanto era editada. Recarregue e tente novamente." });
   }
-
-  const fromStockReturn = order.status === "stock_returned";
-
-  await addOrderEvent({
-    orderId: order.id,
-    actorId: req.user.id,
-    eventType: "Atualizada",
-    message: fromStockReturn
-      ? "Operações optou por editar a ordem devolvida pelo estoque. Ordem retornou para rascunho."
-      : "Ordem atualizada.",
-    metadata: fromStockReturn ? { decision: "edit_order", previousStockResult: order.stock_result } : {}
-  });
 
   return res.json(updated);
 });
@@ -1011,20 +1020,21 @@ ordersRouter.post("/:id/submit", requireRole("requester", "admin"), async (req, 
        RETURNING *`,
       [order.id]
     );
-    if (rows[0]) await clearStockItemCheck(client, order.id);
+    if (rows[0]) {
+      await clearStockItemCheck(client, order.id);
+      await addOrderEvent({
+        orderId: order.id,
+        actorId: req.user.id,
+        eventType: "Enviada",
+        message: "Ordem enviada para conferência do estoque."
+      }, client);
+    }
     return rows[0];
   });
 
   if (!submitted) {
     return res.status(409).json({ message: "Ordem nao pode ser enviada neste status." });
   }
-
-  await addOrderEvent({
-    orderId: order.id,
-    actorId: req.user.id,
-    eventType: "Enviada",
-    message: "Ordem enviada para conferência do estoque."
-  });
 
   return res.json(submitted);
 });
@@ -1055,20 +1065,24 @@ ordersRouter.post("/:id/stock/start", requireRole("stock"), async (req, res) => 
     return res.status(409).json({ message: "Apenas ordens aguardando conferência podem ter a conferência iniciada." });
   }
 
-  const updated = await transitionStatus(
-    { query }, order.id, "awaiting_stock_check", "stock_checking", "stock_checker_id = $4", [req.user.id]
-  );
+  const updated = await withTransaction(async (client) => {
+    const row = await transitionStatus(
+      client, order.id, "awaiting_stock_check", "stock_checking", "stock_checker_id = $4", [req.user.id]
+    );
+    if (row) {
+      await addOrderEvent({
+        orderId: order.id,
+        actorId: req.user.id,
+        eventType: "Conferência iniciada",
+        message: "Estoque iniciou a conferência do material."
+      }, client);
+    }
+    return row;
+  });
 
   if (!updated) {
     return res.status(409).json({ message: "A conferência desta ordem já foi iniciada." });
   }
-
-  await addOrderEvent({
-    orderId: order.id,
-    actorId: req.user.id,
-    eventType: "Conferência iniciada",
-    message: "Estoque iniciou a conferência do material."
-  });
 
   return res.json(updated);
 });
@@ -1142,6 +1156,8 @@ ordersRouter.post("/:id/stock/check", requireRole("stock"), async (req, res) => 
   }
 
   const nextStatus = result === "complete" ? "stock_picking" : "stock_returned";
+  // Hora oficial obtida antes de abrir a transação, para não segurar a linha travada esperando a rede
+  const checkedAt = await networkNow();
   const client = await pool.connect();
 
   try {
@@ -1152,8 +1168,8 @@ ordersRouter.post("/:id/stock/check", requireRole("stock"), async (req, res) => 
       order.id,
       "stock_checking",
       nextStatus,
-      "stock_result = $4, stock_accessories_note = $5, stock_checker_id = $6, stock_checked_at = NOW()",
-      [result, accessoriesNote, req.user.id]
+      "stock_result = $4, stock_accessories_note = $5, stock_checker_id = $6, stock_checked_at = $7",
+      [result, accessoriesNote, req.user.id, checkedAt]
     );
 
     if (!updated) {
@@ -1175,21 +1191,17 @@ ordersRouter.post("/:id/stock/check", requireRole("stock"), async (req, res) => 
       .map((line) => `item ${line.line}: ${line.accessories.map((key) => STOCK_ACCESSORY_LABELS[key]).join(", ") || "nenhum"}`)
       .join("; ")}.`;
 
-    await client.query(
-      `INSERT INTO order_events (service_order_id, actor_id, event_type, message, metadata)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [
-        order.id,
-        req.user.id,
-        "Conferência registrada",
-        `Conferência do estoque: ${STOCK_RESULT_LABELS[result]}.${missingSummary}${accompanyingSummary}${accessoriesNote ? ` Acessórios: ${accessoriesNote}` : ""}`,
-        {
-          result,
-          accessoriesNote,
-          items: lines.map(({ id, line, requested, checked, note, accessories }) => ({ id, line, requested, checked, note, accessories }))
-        }
-      ]
-    );
+    await addOrderEvent({
+      orderId: order.id,
+      actorId: req.user.id,
+      eventType: "Conferência registrada",
+      message: `Conferência do estoque: ${STOCK_RESULT_LABELS[result]}.${missingSummary}${accompanyingSummary}${accessoriesNote ? ` Acessórios: ${accessoriesNote}` : ""}`,
+      metadata: {
+        result,
+        accessoriesNote,
+        items: lines.map(({ id, line, requested, checked, note, accessories }) => ({ id, line, requested, checked, note, accessories }))
+      }
+    }, client);
 
     await client.query("COMMIT");
     return res.json(updated);
@@ -1212,18 +1224,22 @@ ordersRouter.post("/:id/stock/release", requireRole("stock"), async (req, res) =
     return res.status(409).json({ message: "Apenas ordens em separação podem ser liberadas ao Suporte." });
   }
 
-  const updated = await transitionStatus({ query }, order.id, "stock_picking", "pending_signature");
+  const updated = await withTransaction(async (client) => {
+    const row = await transitionStatus(client, order.id, "stock_picking", "pending_signature");
+    if (row) {
+      await addOrderEvent({
+        orderId: order.id,
+        actorId: req.user.id,
+        eventType: "Separação concluída",
+        message: "Material separado pelo estoque. Ordem enviada para assinatura do Suporte."
+      }, client);
+    }
+    return row;
+  });
 
   if (!updated) {
     return res.status(409).json({ message: "Esta ordem já foi liberada." });
   }
-
-  await addOrderEvent({
-    orderId: order.id,
-    actorId: req.user.id,
-    eventType: "Separação concluída",
-    message: "Material separado pelo estoque. Ordem enviada para assinatura do Suporte."
-  });
 
   return res.json(updated);
 });
@@ -1260,19 +1276,23 @@ ordersRouter.post("/:id/stock-return/forward", requireRole("requester", "admin")
     return res.status(400).json({ message: parsed.error.issues[0]?.message });
   }
 
-  const updated = await transitionStatus({ query }, order.id, "stock_returned", "pending_signature");
+  const updated = await withTransaction(async (client) => {
+    const row = await transitionStatus(client, order.id, "stock_returned", "pending_signature");
+    if (row) {
+      await addOrderEvent({
+        orderId: order.id,
+        actorId: req.user.id,
+        eventType: "Encaminhada com falta de material",
+        message: `Operações encaminhou ao Suporte com conferência ${STOCK_RESULT_LABELS[order.stock_result] ?? "incompleta"}. Justificativa: ${parsed.data.justification}`,
+        metadata: { decision: "forward_to_support", stockResult: order.stock_result, justification: parsed.data.justification }
+      }, client);
+    }
+    return row;
+  });
 
   if (!updated) {
     return res.status(409).json({ message: "Esta ordem já recebeu uma decisão." });
   }
-
-  await addOrderEvent({
-    orderId: order.id,
-    actorId: req.user.id,
-    eventType: "Encaminhada com falta de material",
-    message: `Operações encaminhou ao Suporte com conferência ${STOCK_RESULT_LABELS[order.stock_result] ?? "incompleta"}. Justificativa: ${parsed.data.justification}`,
-    metadata: { decision: "forward_to_support", stockResult: order.stock_result, justification: parsed.data.justification }
-  });
 
   return res.json(updated);
 });
@@ -1290,21 +1310,22 @@ ordersRouter.post("/:id/stock-return/recheck", requireRole("requester", "admin")
       "awaiting_stock_check",
       "stock_result = NULL, stock_accessories_note = NULL, stock_checker_id = NULL, stock_checked_at = NULL"
     );
-    if (row) await clearStockItemCheck(client, order.id);
+    if (row) {
+      await clearStockItemCheck(client, order.id);
+      await addOrderEvent({
+        orderId: order.id,
+        actorId: req.user.id,
+        eventType: "Devolvida ao estoque",
+        message: `Operações devolveu a ordem para nova conferência do estoque.${note ? ` Observação: ${note}` : ""}`,
+        metadata: { decision: "return_to_stock", previousStockResult: order.stock_result }
+      }, client);
+    }
     return row;
   });
 
   if (!updated) {
     return res.status(409).json({ message: "Esta ordem já recebeu uma decisão." });
   }
-
-  await addOrderEvent({
-    orderId: order.id,
-    actorId: req.user.id,
-    eventType: "Devolvida ao estoque",
-    message: `Operações devolveu a ordem para nova conferência do estoque.${note ? ` Observação: ${note}` : ""}`,
-    metadata: { decision: "return_to_stock", previousStockResult: order.stock_result }
-  });
 
   return res.json(updated);
 });
@@ -1341,6 +1362,12 @@ ordersRouter.post("/:id/request-correction", requireRole("signer"), async (req, 
     );
     if (rows[0]) {
       await client.query("DELETE FROM order_signatures WHERE service_order_id = $1", [order.id]);
+      await addOrderEvent({
+        orderId: order.id,
+        actorId: req.user.id,
+        eventType: "Correção necessária",
+        message: parsed.data.message
+      }, client);
     }
     return rows[0];
   });
@@ -1348,13 +1375,6 @@ ordersRouter.post("/:id/request-correction", requireRole("signer"), async (req, 
   if (!updated) {
     return res.status(409).json({ message: "Apenas ordens pendentes ou divergentes podem receber devolutiva." });
   }
-
-  await addOrderEvent({
-    orderId: order.id,
-    actorId: req.user.id,
-    eventType: "Correção necessária",
-    message: parsed.data.message
-  });
 
   return res.json(updated);
 });
@@ -1455,20 +1475,16 @@ ordersRouter.post("/:id/sign", requireRole("signer"), async (req, res) => {
           });
         }
 
-        await client.query(
-          `INSERT INTO order_events (service_order_id, actor_id, event_type, message, metadata)
-           VALUES ($1, $2, $3, $4, $5)`,
-          [
-            order.id,
-            req.user.id,
-            "Assinatura incorreta",
-            `Assinatura realizada incorretamente (${incorrectCount}ª tentativa). As quantidades de chaves divergiram no double check. Ordem retornada para nova assinatura.`,
-            {
-              divergenceType: "key_count_mismatch",
-              incorrectCount
-            }
-          ]
-        );
+        await addOrderEvent({
+          orderId: order.id,
+          actorId: req.user.id,
+          eventType: "Assinatura incorreta",
+          message: `Assinatura realizada incorretamente (${incorrectCount}ª tentativa). As quantidades de chaves divergiram no double check. Ordem retornada para nova assinatura.`,
+          metadata: {
+            divergenceType: "key_count_mismatch",
+            incorrectCount
+          }
+        }, client);
 
         await client.query("COMMIT");
 
@@ -1521,19 +1537,15 @@ ordersRouter.post("/:id/sign", requireRole("signer"), async (req, res) => {
 
     const { rows } = await client.query(updateSql, [req.user.id, nextStatus, order.id]);
 
-    await client.query(
-      `INSERT INTO order_events (service_order_id, actor_id, event_type, message, metadata)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [
-        order.id,
-        req.user.id,
-        "Assinada",
-        signatureCount >= 2
-          ? "Ordem aprovada com duas assinaturas no double check."
-          : "Primeira assinatura registrada. Aguardando segunda assinatura.",
-        { signatureHash, signatureCount, keyCount }
-      ]
-    );
+    await addOrderEvent({
+      orderId: order.id,
+      actorId: req.user.id,
+      eventType: "Assinada",
+      message: signatureCount >= 2
+        ? "Ordem aprovada com duas assinaturas no double check."
+        : "Primeira assinatura registrada. Aguardando segunda assinatura.",
+      metadata: { signatureHash, signatureCount, keyCount }
+    }, client);
 
     await client.query("COMMIT");
 
@@ -1618,20 +1630,16 @@ ordersRouter.post("/:id/incorrect-signature", requireRole("signer", "admin"), as
       });
     }
 
-    await client.query(
-      `INSERT INTO order_events (service_order_id, actor_id, event_type, message, metadata)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [
-        order.id,
-        req.user.id,
-        "Assinatura incorreta",
-        `Assinatura realizada incorretamente (${incorrectCount}ª tentativa).${reason} Ordem retornada para a etapa de assinatura.`,
-        {
-          incorrectCount,
-          reason: reasonText
-        }
-      ]
-    );
+    await addOrderEvent({
+      orderId: order.id,
+      actorId: req.user.id,
+      eventType: "Assinatura incorreta",
+      message: `Assinatura realizada incorretamente (${incorrectCount}ª tentativa).${reason} Ordem retornada para a etapa de assinatura.`,
+      metadata: {
+        incorrectCount,
+        reason: reasonText
+      }
+    }, client);
 
     await client.query("COMMIT");
 

@@ -22,7 +22,8 @@ dashboardRouter.get("/", async (req, res) => {
     } else if (userRole === "spectator") {
       baseFilter = "WHERE status != 'draft'";
     } else if (userRole === "stock") {
-      baseFilter = `WHERE (status::text IN ('awaiting_stock_check', 'stock_checking', 'stock_picking', 'stock_returned') OR stock_checker_id IS NOT NULL)`;
+      // Mesma regra de STOCK_VISIBILITY_SQL em orders.js: rascunho nunca entra
+      baseFilter = `WHERE status::text <> 'draft' AND (status::text IN ('awaiting_stock_check', 'stock_checking', 'stock_picking', 'stock_returned') OR stock_checker_id IS NOT NULL)`;
     } else {
       // Admin: visão geral de todas as ordens
       baseFilter = "";

@@ -668,7 +668,12 @@ function App() {
       await loadData();
       notifyRealtimeSync();
       if (selected) {
-        setSelected(await api.request(`/orders/${selected.id}`));
+        // OS divergente sai da visão do assinante: fecha o detalhe em vez de recarregá-lo
+        if (session.user.role === "signer" && result?.status === "divergent") {
+          setSelected(null);
+        } else {
+          setSelected(await api.request(`/orders/${selected.id}`));
+        }
       }
       return result;
     } catch (err) {
@@ -3514,7 +3519,7 @@ function OrderDetails({
   const hasCurrentUserSigned = signedUserIds.includes(session.user.id);
   const isSpectator = session.user.role === "spectator";
   const isOwnerOrAdmin = session.user.role === "admin" || (session.user.role === "requester" && selected.requester_id === session.user.id);
-  const canEdit = allowEdit && ["admin", "requester"].includes(session.user.role) && ["draft", "correction_requested", "stock_returned"].includes(selected.status);
+  const canEdit = allowEdit && ["admin", "requester"].includes(session.user.role) && ["draft", "correction_requested", "divergent", "stock_returned"].includes(selected.status);
   const canSubmit = canEdit && selected.status !== "stock_returned";
   const isStockUser = session.user.role === "stock";
   const canStockAct = isStockUser && ["awaiting_stock_check", "stock_checking", "stock_picking"].includes(selected.status);
@@ -4084,7 +4089,7 @@ function orderValidationHint(order) {
   }
 
   if (order.status === "divergent") {
-    return "Divergência apontada";
+    return "Correção de Operações (divergência na assinatura)";
   }
 
   if (order.status === "draft") {

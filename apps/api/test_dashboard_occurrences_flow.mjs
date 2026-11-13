@@ -46,6 +46,16 @@ async function passThroughStock(orderId, stockToken) {
   return releaseRes.data;
 }
 
+// OS divergente volta ao solicitante: reenvio e nova conferência do Estoque antes de voltar ao Suporte
+async function resubmitDivergent(orderId, requesterToken, stockToken) {
+  const submitRes = await request(`/orders/${orderId}/submit`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${requesterToken}` }
+  });
+  assert.equal(submitRes.status, 200, `Falha ao reenviar OS divergente: ${JSON.stringify(submitRes.data)}`);
+  return passThroughStock(orderId, stockToken);
+}
+
 async function runDashboardOccurrencesTests() {
   console.log("================================================================================");
   console.log("TESTES OBRIGATÓRIOS: DASHBOARD, HISTÓRICO E OCORRÊNCIAS DE ASSINATURA");
@@ -189,11 +199,14 @@ async function runDashboardOccurrencesTests() {
   const detailAfterMis1 = await request(`/orders/${testOrderId}`, {
     headers: { Authorization: `Bearer ${adminToken}` }
   });
-  assert.equal(detailAfterMis1.data.status, "pending_signature");
+  assert.equal(detailAfterMis1.data.status, "divergent");
   assert.equal(detailAfterMis1.data.signatures.length, 0, "Nenhuma assinatura deve estar concluída após mismatch");
   assert.equal(detailAfterMis1.data.incorrect_signatures, 1);
   assert.equal(detailAfterMis1.data.occurrences.length, 0, "Não deve registrar ocorrência na 1ª tentativa (exige 2)");
   console.log("  ✔ 1ª tentativa incorreta NÃO registrada como assinatura concluída nem como ocorrência.");
+
+  // OS divergente volta ao solicitante: reenvio + nova conferência do estoque
+  await resubmitDivergent(testOrderId, requesterToken, stockToken);
 
   // Tentativa 2 incorreta: Signer 1 assina 4, Signer 2 informa 1 (segunda divergência -> 2ª tentativa incorreta)
   await request(`/orders/${testOrderId}/sign`, {
@@ -220,7 +233,8 @@ async function runDashboardOccurrencesTests() {
   const createdOcc = detailAfterMis2.data.occurrences[0];
   assert.equal(createdOcc.order_code, testOrderCode);
   assert.equal(createdOcc.attempt_count, 2);
-  assert.equal(createdOcc.status, "pending");
+  // "email_sent" quando o aviso automático (assíncrono) já foi entregue ao SMTP
+  assert.ok(["pending", "email_sent"].includes(createdOcc.status), `Status inesperado da ocorrência: ${createdOcc.status}`);
   assert.ok(createdOcc.user_name, "Usuário envolvido deve estar presente");
   assert.ok(createdOcc.description, "Descrição da ocorrência deve estar presente");
   console.log(`  ✔ Ocorrência registrada com sucesso: OS ${createdOcc.order_code}, Tentativas=${createdOcc.attempt_count}, Status=${createdOcc.status}, Usuário=${createdOcc.user_name}`);
@@ -254,7 +268,8 @@ async function runDashboardOccurrencesTests() {
   const emailRes = await request(`/orders/occurrences/${createdOcc.id}/send-email`, {
     method: "POST",
     headers: { Authorization: `Bearer ${adminToken}` },
-    body: JSON.stringify({ recipient: "auditoria@empresa.com" })
+    // resend: a ocorrência pode já ter sido notificada pelo aviso automático de OS divergente
+    body: JSON.stringify({ recipient: "auditoria@empresa.com", resend: true })
   });
   assert.equal(emailRes.status, 200);
   assert.ok(emailRes.data.preview, "Deve conter pré-visualização do e-mail");
@@ -282,6 +297,7 @@ async function runDashboardOccurrencesTests() {
   // 6. CONTINUIDADE DO FLUXO NORMAL DE ASSINATURA VÁLIDA
   // ---------------------------------------------------------------------------
   console.log("\n▶ [Teste 13] Confirmando que assinatura válida subsequente funciona normalmente...");
+  await resubmitDivergent(testOrderId, requesterToken, stockToken);
   // Signer 1 assina com 4
   const val1 = await request(`/orders/${testOrderId}/sign`, {
     method: "POST",

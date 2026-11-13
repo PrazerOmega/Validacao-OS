@@ -304,15 +304,35 @@ async function runTests() {
   });
   assert.equal(sign2DivergentRes.status, 200);
   assert.equal(sign2DivergentRes.data.incorrectSignature, true, "Deve registrar assinatura incorreta/divergente");
-  assert.equal(sign2DivergentRes.data.status, "pending_signature");
+  assert.equal(sign2DivergentRes.data.status, "divergent");
   assert.equal(sign2DivergentRes.data.order.incorrect_signatures, 1);
 
   const checkAfterDivergence = await request(`/orders/${producaoOrder.id}`, {
     headers: { Authorization: `Bearer ${requesterToken}` }
   });
+  assert.equal(checkAfterDivergence.data.status, "divergent");
   assert.equal(checkAfterDivergence.data.executor_team, "producao", "executor_team DEVE permanecer 'producao' após divergência no double check!");
   assert.equal(checkAfterDivergence.data.signatures.length, 0, "Assinaturas devem ser resetadas para nova tentativa de conferência");
-  console.log("  ✔ Divergência no double check detectada, ordem retornada para conferência com executor_team intacto.");
+
+  const signerDivergentDetail = await request(`/orders/${producaoOrder.id}`, {
+    headers: { Authorization: `Bearer ${signer1Token}` }
+  });
+  assert.equal(signerDivergentDetail.status, 403, "Assinante NÃO deve acessar OS divergente");
+  const signerList = await request("/orders", {
+    headers: { Authorization: `Bearer ${signer1Token}` }
+  });
+  const signerOrders = Array.isArray(signerList.data) ? signerList.data : signerList.data?.orders ?? [];
+  assert.equal(signerOrders.some((o) => o.id === producaoOrder.id), false, "OS divergente NÃO deve aparecer na lista do assinante");
+  console.log("  ✔ Divergência no double check detectada: OS devolvida ao solicitante e oculta dos assinantes, executor_team intacto.");
+
+  // Solicitante reenvia; a OS passa pelo estoque de novo antes de voltar aos assinantes
+  const resubmitDivergentRes = await request(`/orders/${producaoOrder.id}/submit`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${requesterToken}` }
+  });
+  assert.equal(resubmitDivergentRes.status, 200, "Solicitante deve conseguir reenviar a OS divergente");
+  assert.equal(resubmitDivergentRes.data.status, "awaiting_stock_check");
+  await passThroughStock(producaoOrder.id, stockToken);
 
   // 7.5 Aprovação definitiva com double check concordante
   console.log("  → 7.5 Validador 1 assina novamente com keyCount=10...");

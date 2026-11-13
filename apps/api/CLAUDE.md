@@ -36,8 +36,8 @@ Nunca alterar instruções anteriores de forma que quebre bancos existentes.
 
 - Dupla checagem cega por dois assinantes diferentes.
 - Cada assinatura guarda um hash SHA-256 (`utils/signature.js`) de dados da OS + assinante + hora oficial + IP + UA.
-- Contagens divergentes: descartam as duas assinaturas, incrementam `incorrect_signatures` e registram `signature_attempts`.
-- A partir da 2ª tentativa incorreta: cria/atualiza `signature_occurrences` e envia e-mails de alerta (`services/emailService.js`, destinatários em `notification_emails`).
+- Contagens divergentes: descartam as duas assinaturas, incrementam `incorrect_signatures`, registram `signature_attempts` e levam a OS a `divergent`. Ela volta ao solicitante (reenvio passa pelo estoque) e some para `signer` (`canSeeOrder`, `visibilityFilters`, dashboard).
+- Cada divergência envia o aviso de OS divergente (`sendDivergenceEmail`) para `notification_emails`. A partir da 2ª tentativa incorreta também cria/atualiza `signature_occurrences`, que fica marcada como notificada por esse aviso.
 
 ## Regra de sigilo: contagem de chaves
 

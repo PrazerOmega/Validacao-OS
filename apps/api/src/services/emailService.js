@@ -124,6 +124,90 @@ Nenhum dado confidencial, senha ou chave privada é exposto neste e-mail.
   return { subject, bodyText, bodyHtml };
 }
 
+/**
+ * E-mail de OS divergente: as quantidades de chaves dos dois assinantes não conferem,
+ * a OS saiu da etapa de assinatura e voltou ao solicitante.
+ * Nunca inclui quantidades de chaves (double check cego).
+ */
+export function formatDivergenceEmail({ order = {}, attemptNumber, occurredAt }) {
+  const code = order.code || "N/A";
+  const dateFormatted = occurredAt
+    ? new Intl.DateTimeFormat("pt-BR", {
+        dateStyle: "short",
+        timeStyle: "medium",
+        timeZone: BRASILIA_TIMEZONE
+      }).format(new Date(occurredAt))
+    : "N/A";
+  const team = order.executor_team ? (order.executor_team === "producao" ? "Produção" : "Suporte") : "Não definida";
+  const requester = order.requester_name || order.authorized_person_name || "Não informado";
+
+  const subject = `[Validação de OS] OS ${code} divergente - devolvida ao solicitante`;
+
+  const bodyText = `
+AVISO DE ORDEM DE SERVIÇO DIVERGENTE - VALIDAÇÃO DE ORDENS DE SERVIÇO
+-----------------------------------------------------------------
+
+As quantidades de chaves informadas pelos dois assinantes não conferem no double check.
+A OS foi retirada da etapa de assinatura e devolvida ao solicitante para correção.
+
+• Ordem de Serviço: ${code}
+• Tipo de Ordem: ${order.order_type || "Não informado"}
+• Equipe Executora: ${team}
+• Solicitante: ${requester}
+• Data e Hora: ${dateFormatted}
+• Tentativa incorreta nº: ${attemptNumber}
+
+Próximo passo:
+O solicitante deve conferir a OS e reenviá-la. A OS passa novamente pela conferência do estoque antes de voltar aos assinantes.
+
+-----------------------------------------------------------------
+Mensagem gerada automaticamente pelo Sistema de Validação de Ordens de Serviço.
+Nenhum dado confidencial, senha ou chave privada é exposto neste e-mail.
+`.trim();
+
+  const bodyHtml = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f8fafc; color: #1e293b; padding: 20px; }
+    .card { max-width: 600px; margin: 0 auto; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; }
+    .header { background: #d97706; color: #ffffff; padding: 16px 20px; font-size: 18px; font-weight: bold; }
+    .content { padding: 24px; font-size: 14px; line-height: 1.6; }
+    .info-table { width: 100%; border-collapse: collapse; margin: 16px 0; }
+    .info-table td { padding: 8px 12px; border-bottom: 1px solid #f1f5f9; }
+    .info-table td.label { font-weight: 600; color: #64748b; width: 38%; }
+    .info-table td.val { color: #0f172a; }
+    .footer { background: #f8fafc; padding: 12px 24px; font-size: 12px; color: #94a3b8; border-top: 1px solid #e2e8f0; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="header">⚠️ OS divergente devolvida ao solicitante</div>
+    <div class="content">
+      <p>As quantidades de chaves informadas pelos dois assinantes da OS <strong>${escapeHtml(code)}</strong> não conferem no double check. A OS foi retirada da etapa de assinatura e devolvida ao solicitante para correção.</p>
+      <table class="info-table">
+        <tr><td class="label">Código da OS</td><td class="val"><strong>${escapeHtml(code)}</strong></td></tr>
+        <tr><td class="label">Tipo de Ordem</td><td class="val">${escapeHtml(order.order_type || "Não informado")}</td></tr>
+        <tr><td class="label">Equipe Executora</td><td class="val">${escapeHtml(team)}</td></tr>
+        <tr><td class="label">Solicitante</td><td class="val">${escapeHtml(requester)}</td></tr>
+        <tr><td class="label">Data e Hora</td><td class="val">${escapeHtml(dateFormatted)}</td></tr>
+        <tr><td class="label">Tentativa incorreta nº</td><td class="val">${escapeHtml(attemptNumber)}</td></tr>
+      </table>
+      <p style="margin-top: 20px;">O solicitante deve conferir a OS e reenviá-la. A OS passa novamente pela conferência do estoque antes de voltar aos assinantes.</p>
+    </div>
+    <div class="footer">
+      Sistema de Validação de OS • Este comunicado foi gerado automaticamente sem exposição de dados sensíveis.
+    </div>
+  </div>
+</body>
+</html>
+`.trim();
+
+  return { subject, bodyText, bodyHtml };
+}
+
 const EMAIL_REGEX = /^[^\s@,;]+@[^\s@,;]+\.[^\s@,;]+$/;
 export const MAX_RECIPIENTS = 30;
 
@@ -165,9 +249,20 @@ async function getTransporter() {
  * Só retorna success=true quando o servidor SMTP aceitou a mensagem.
  */
 export async function sendOccurrenceEmail({ occurrence, order = {}, recipient }) {
+  return sendFormattedEmail(formatOccurrenceEmail(occurrence, order), recipient);
+}
+
+/**
+ * Envia o aviso de OS divergente (quantidades de chaves diferentes no double check).
+ * Mesmas regras de destinatário e de retorno de sendOccurrenceEmail.
+ */
+export async function sendDivergenceEmail({ order, attemptNumber, occurredAt, recipient }) {
+  return sendFormattedEmail(formatDivergenceEmail({ order, attemptNumber, occurredAt }), recipient);
+}
+
+async function sendFormattedEmail({ subject, bodyText, bodyHtml }, recipient) {
   const rawRecipient = recipient || process.env.NOTIFICATION_EMAIL || "";
   const recipients = parseRecipients(rawRecipient);
-  const { subject, bodyText, bodyHtml } = formatOccurrenceEmail(occurrence, order);
 
   if (recipients === null) {
     return {

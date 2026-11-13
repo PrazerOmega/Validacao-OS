@@ -205,8 +205,9 @@ Gera os arquivos em `apps/web/dist`. O `firebase.json` já está configurado par
    ┌────────┴──────────────┐
  Chaves iguais        Chaves diferentes
    ▼                       ▼
- Aprovada            Assinatura incorreta → volta a "Pendente validação"
-                     (2ª tentativa incorreta gera uma Ocorrência + e-mail de alerta)
+ Aprovada            Divergente → some para o Suporte, volta a Operações
+                     e envia e-mail aos endereços cadastrados
+                     (2ª tentativa incorreta também gera uma Ocorrência)
 
  Suporte pode também "Solicitar correção" → Aguardando correção → Operações corrige e reenvia
 ```
@@ -223,7 +224,7 @@ Gera os arquivos em `apps/web/dist`. O `firebase.json` já está configurado par
 | `pending_signature`     | Pendente validação      | Suporte     |
 | `correction_requested`  | Aguardando correção     | Operações   |
 | `signed`                | Aprovada                | —           |
-| `divergent`             | Divergente (legado)     | Operações / Suporte |
+| `divergent`             | Divergente              | Operações (oculta para o Suporte) |
 | `cancelled`             | Cancelada               | —           |
 
 ### Etapa 1 — Criar a OS (Operações)
@@ -284,7 +285,7 @@ A assinatura exige **dois usuários diferentes do Suporte**, e cada um conta as 
 2. O **2º assinante** (outro usuário) faz o mesmo, informando a quantidade que contou.
 3. O sistema compara as duas quantidades:
    - **Iguais** → a OS fica **Aprovada**. ✅
-   - **Diferentes** → é registrada uma **assinatura incorreta**: as duas assinaturas são descartadas e a OS volta para **Pendente validação** para uma nova tentativa.
+   - **Diferentes** → é registrada uma **assinatura incorreta**: as duas assinaturas são descartadas e a OS fica **Divergente**. Ela deixa de aparecer para os assinantes (lista, dashboard e detalhe), volta para Operações e um **e-mail automático** é enviado para todos os endereços cadastrados pelo admin. Operações confere e reenvia a OS, que passa de novo pelo Estoque antes de voltar ao Suporte (como na etapa 7).
 
 Cada assinatura gera um **hash SHA-256** com os dados da OS, o usuário (identificado pelo e-mail de login), a data/hora oficial, o IP e o navegador. Isso forma a trilha de auditoria.
 
@@ -304,7 +305,7 @@ Cada assinatura gera um **hash SHA-256** com os dados da OS, o usuário (identif
 Quando uma mesma OS acumula **2 ou mais tentativas incorretas de assinatura**, o sistema:
 
 1. Cria (ou atualiza) uma **Ocorrência** para aquela OS, com situação **Pendente**.
-2. Envia **automaticamente um e-mail de alerta** para todos os endereços cadastrados pelo admin. Ao enviar, a ocorrência passa para **E-mail enviado**.
+2. Envia **automaticamente um e-mail de alerta** para todos os endereços cadastrados pelo admin. Ao enviar, a ocorrência passa para **E-mail enviado**. Quando a tentativa incorreta vem do double check (chaves diferentes), esse alerta é o próprio aviso de OS divergente, enviado a cada divergência.
 
 > Por segurança do double check, nem a descrição da ocorrência nem o e-mail mostram as quantidades de chaves. Só o **Admin** vê, na tela de ocorrências, quantas chaves cada assinante informou.
 

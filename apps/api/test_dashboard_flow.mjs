@@ -271,7 +271,26 @@ async function runDashboardTests() {
   );
   console.log("  ✔ 'Divergências' refletido dinamicamente no dashboard após mismatch de double check.");
 
-  // 5.6 Resolver divergência e aprovar a OS
+  // OS divergente sai da visão dos assinantes (lista e dashboard)
+  const signerDivergentDash = await request("/dashboard", {
+    headers: { Authorization: `Bearer ${signer1.token}` }
+  });
+  assert.equal(signerDivergentDash.status, 200);
+  const signerDivergentDetail = await request(`/orders/${createdOrder.id}`, {
+    headers: { Authorization: `Bearer ${signer1.token}` }
+  });
+  assert.equal(signerDivergentDetail.status, 403, "Assinante NÃO deve acessar OS divergente");
+  console.log("  ✔ OS divergente bloqueada para o assinante.");
+
+  // 5.6 Solicitante reenvia a OS divergente (passa pelo estoque de novo) e ela é aprovada
+  const resubmitRes = await request(`/orders/${createdOrder.id}/submit`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${requester.token}` }
+  });
+  assert.equal(resubmitRes.status, 200, "Solicitante deve conseguir reenviar a OS divergente");
+  assert.equal(resubmitRes.data.status, "awaiting_stock_check");
+  await passThroughStock(createdOrder.id, stock.token);
+
   const beforeApproved = await request("/dashboard", {
     headers: { Authorization: `Bearer ${admin.token}` }
   });

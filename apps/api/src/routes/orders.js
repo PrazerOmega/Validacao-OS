@@ -4,7 +4,7 @@ import { pool, query, withTransaction } from "../db/pool.js";
 import { requireRole } from "../middleware/auth.js";
 import { addOrderEvent } from "../utils/audit.js";
 import { buildSignature } from "../utils/signature.js";
-import { sendOccurrenceEmail } from "../services/emailService.js";
+import { sendDivergenceEmail, sendOccurrenceEmail } from "../services/emailService.js";
 import { listNotificationEmails } from "./notifications.js";
 import { formatOrderCode, orderYearFor } from "../utils/orderCode.js";
 import { BRASILIA_TIMEZONE, addDaysToDateKey, brasiliaDateKey, networkNow } from "../utils/networkTime.js";
@@ -180,6 +180,8 @@ function canSeeOrder(user, order) {
   if (user.role === "admin") return true;
   if (order.requester_id === user.id) return true;
   if (order.status === "draft") return false;
+  // OS divergente (chaves diferentes no double check) sai da visão dos assinantes
+  if (user.role === "signer" && order.status === "divergent") return false;
   if (user.role === "stock") return STOCK_STATUSES.includes(order.status) || Boolean(order.stock_checker_id);
   return user.role === "spectator" || order.destination_role === user.role;
 }
@@ -196,7 +198,7 @@ function visibilityFilters(user) {
     filters.push(`so.requester_id = $${params.length}`);
   } else if (user.role === "signer") {
     params.push(user.role);
-    filters.push(`so.destination_role = $${params.length} AND so.status != 'draft'`);
+    filters.push(`so.destination_role = $${params.length} AND so.status NOT IN ('draft', 'divergent')`);
   } else if (user.role === "spectator") {
     filters.push("so.status != 'draft'");
   } else if (user.role === "stock") {
@@ -349,6 +351,63 @@ async function notifyOccurrenceAutomatically(orderId, actorId) {
 
 function triggerAutomaticNotification(orderId, actorId) {
   notifyOccurrenceAutomatically(orderId, actorId).catch((error) => {
+    console.error("[Notificação automática] Erro inesperado:", error);
+  });
+}
+
+/**
+ * Envia automaticamente o aviso de OS divergente para todos os e-mails cadastrados pelo admin.
+ * Roda após o COMMIT e nunca derruba a requisição de assinatura.
+ * Se a OS tiver ocorrência ativa (2ª tentativa em diante), ela fica marcada como notificada.
+ */
+async function notifyDivergenceAutomatically(orderId, actorId, attemptNumber) {
+  const order = await findOrder(orderId);
+  if (!order) return;
+
+  const recipients = await listNotificationEmails();
+  if (recipients.length === 0 && !process.env.NOTIFICATION_EMAIL) {
+    console.warn(`[Notificação automática] OS ${order.code}: nenhum e-mail cadastrado para receber o aviso de divergência.`);
+    return;
+  }
+
+  const result = await sendDivergenceEmail({
+    order,
+    attemptNumber,
+    occurredAt: await networkNow(),
+    recipient: recipients.join(", ")
+  });
+
+  if (result.success) {
+    await query(
+      `UPDATE signature_occurrences
+       SET status = 'email_sent', email_sent_at = $3, email_recipient = $1, updated_at = NOW()
+       WHERE service_order_id = $2 AND status <> 'resolved'`,
+      [result.recipient, orderId, result.sentAt]
+    );
+    await addOrderEvent({
+      orderId,
+      actorId,
+      eventType: "Aviso enviado por e-mail",
+      message: `Aviso de OS divergente enviado automaticamente para ${result.recipient}.`,
+      metadata: { automatic: true }
+    });
+    return;
+  }
+
+  console.warn(`[Notificação automática] OS ${order.code}: ${result.reason}`);
+  if (result.errorCode === "send_failed") {
+    await addOrderEvent({
+      orderId,
+      actorId,
+      eventType: "Falha na notificação",
+      message: `Não foi possível enviar automaticamente o aviso de OS divergente para ${result.recipient}.`,
+      metadata: { automatic: true }
+    });
+  }
+}
+
+function triggerDivergenceNotification(orderId, actorId, attemptNumber) {
+  notifyDivergenceAutomatically(orderId, actorId, attemptNumber).catch((error) => {
     console.error("[Notificação automática] Erro inesperado:", error);
   });
 }
@@ -1341,8 +1400,8 @@ ordersRouter.post("/:id/request-correction", requireRole("signer"), async (req, 
     return res.status(403).json({ message: "Permissao insuficiente." });
   }
 
-  if (!["pending_signature", "divergent"].includes(order.status)) {
-    return res.status(409).json({ message: "Apenas ordens pendentes ou divergentes podem receber devolutiva." });
+  if (order.status !== "pending_signature") {
+    return res.status(409).json({ message: "Apenas ordens pendentes de assinatura podem receber devolutiva." });
   }
 
   const parsed = feedbackSchema.safeParse(req.body);
@@ -1356,7 +1415,7 @@ ordersRouter.post("/:id/request-correction", requireRole("signer"), async (req, 
     const { rows } = await client.query(
       `UPDATE service_orders
        SET status = 'correction_requested', signer_id = NULL, second_signer_id = NULL, updated_at = NOW()
-       WHERE id = $1 AND status::text IN ('pending_signature', 'divergent')
+       WHERE id = $1 AND status = 'pending_signature'
        RETURNING *`,
       [order.id]
     );
@@ -1373,7 +1432,7 @@ ordersRouter.post("/:id/request-correction", requireRole("signer"), async (req, 
   });
 
   if (!updated) {
-    return res.status(409).json({ message: "Apenas ordens pendentes ou divergentes podem receber devolutiva." });
+    return res.status(409).json({ message: "Apenas ordens pendentes de assinatura podem receber devolutiva." });
   }
 
   return res.json(updated);
@@ -1436,10 +1495,10 @@ ordersRouter.post("/:id/sign", requireRole("signer"), async (req, res) => {
       const secondKeyCount = Number(keyCount);
 
       if (firstKeyCount !== secondKeyCount) {
-        // Assinatura incorreta identificada no double check
+        // Divergência no double check: a OS sai dos assinantes e volta ao solicitante
         const { rows } = await client.query(
           `UPDATE service_orders
-           SET status = 'pending_signature',
+           SET status = 'divergent',
                signer_id = NULL,
                second_signer_id = NULL,
                incorrect_signatures = COALESCE(incorrect_signatures, 0) + 1,
@@ -1451,7 +1510,7 @@ ordersRouter.post("/:id/sign", requireRole("signer"), async (req, res) => {
 
         const [firstSignature] = await loadSignaturesForAttempt(client, order.id);
 
-        // Limpa as assinaturas para que a OS retorne para a etapa de assinatura e fique novamente disponível
+        // Descarta as duas assinaturas; a OS só volta aos assinantes depois de reenviada pelo solicitante
         await client.query("DELETE FROM order_signatures WHERE service_order_id = $1", [order.id]);
 
         const incorrectCount = rows[0].incorrect_signatures;
@@ -1479,7 +1538,7 @@ ordersRouter.post("/:id/sign", requireRole("signer"), async (req, res) => {
           orderId: order.id,
           actorId: req.user.id,
           eventType: "Assinatura incorreta",
-          message: `Assinatura realizada incorretamente (${incorrectCount}ª tentativa). As quantidades de chaves divergiram no double check. Ordem retornada para nova assinatura.`,
+          message: `Assinatura realizada incorretamente (${incorrectCount}ª tentativa). As quantidades de chaves divergiram no double check. Ordem marcada como divergente e devolvida ao solicitante.`,
           metadata: {
             divergenceType: "key_count_mismatch",
             incorrectCount
@@ -1488,16 +1547,14 @@ ordersRouter.post("/:id/sign", requireRole("signer"), async (req, res) => {
 
         await client.query("COMMIT");
 
-        if (incorrectCount >= 2) {
-          triggerAutomaticNotification(order.id, req.user.id);
-        }
+        triggerDivergenceNotification(order.id, req.user.id, incorrectCount);
 
         return res.json({
           incorrectSignature: true,
           divergent: false,
-          status: "pending_signature",
+          status: "divergent",
           order: rows[0],
-          message: `Assinatura incorreta identificada (${incorrectCount}ª tentativa). A quantidade de chaves informada não corresponde. A ordem retornou para a etapa de assinatura.`
+          message: `Assinatura incorreta identificada (${incorrectCount}ª tentativa). A quantidade de chaves informada não corresponde. A ordem foi marcada como divergente, devolvida ao solicitante e notificada por e-mail.`
         });
       }
     }

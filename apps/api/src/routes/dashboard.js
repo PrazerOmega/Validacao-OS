@@ -18,7 +18,7 @@ dashboardRouter.get("/", async (req, res) => {
       baseFilter = `WHERE requester_id = $${params.length}`;
     } else if (userRole === "signer") {
       params.push(userRole);
-      baseFilter = `WHERE destination_role = $${params.length} AND status != 'draft'`;
+      baseFilter = `WHERE destination_role = $${params.length} AND status NOT IN ('draft', 'divergent')`;
     } else if (userRole === "spectator") {
       baseFilter = "WHERE status != 'draft'";
     } else if (userRole === "stock") {

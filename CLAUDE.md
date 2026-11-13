@@ -43,7 +43,7 @@ Resumo dos status (comportamento ATUAL do código):
 `draft` → submit → `awaiting_stock_check` → `stock_checking` → (completa) `stock_picking` → release → `pending_signature` → `signed`.
 Conferência parcial/pendente → `stock_returned`, onde o solicitante encaminha aos assinantes (justificativa obrigatória), devolve ao estoque (limpa a conferência anterior) ou edita (volta a `draft`).
 Assinante pode pedir correção → `correction_requested` → solicitante reenvia, sempre passando pelo estoque de novo.
-`divergent` é legado. `executor_team` (`producao` / `suporte`) só separa listagens/abas; o fluxo é o mesmo.
+Contagens de chaves diferentes no double check → `divergent`: a OS some para os assinantes, volta ao solicitante (reenvio passa pelo estoque) e um e-mail automático vai para os endereços cadastrados (`notification_emails`). `executor_team` (`producao` / `suporte`) só separa listagens/abas; o fluxo é o mesmo.
 
 ## Regras gerais
 
